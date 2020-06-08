@@ -56,6 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let utils_messenger =
         unsafe { debug_utils.create_debug_utils_messenger(&debug_create_info, None)? };
 
+    // pick gpu to use (in this case it the discrete gpu)
+    let phys_devs = unsafe { instance.enumerate_physical_devices()? };
+    let (physical_device, physical_device_properties) = {
+        let mut chosen = None;
+        for p in phys_devs {
+            let properties = unsafe { instance.get_physical_device_properties(p) };
+            if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
+                chosen = Some((p, properties));
+            }
+        }
+        chosen.unwrap()
+    };
+
     // instance cleanup
     unsafe {
         debug_utils.destroy_debug_utils_messenger(utils_messenger, None);
