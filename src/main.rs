@@ -1,10 +1,11 @@
 use ash::{
-    version::{EntryV1_0, InstanceV1_0},
-    vk,
+    version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
+    vk, Entry,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let entry = ash::Entry::new()?;
+    // vulkan entry
+    let entry = Entry::new()?;
 
     // setup varaibles for ApplicationInfo
     let engine_name = std::ffi::CString::new("GameEngine").unwrap();
@@ -69,8 +70,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chosen.unwrap()
     };
 
-    // instance cleanup
+    // find queue family indices
+    let queue_family_properties =
+        unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+    let q_fam_indicies = {
+        let mut found_grapics_q_index = None;
+        let mut found_transfer_q_index = None;
+        for (index, q_fam) in queue_family_properties.iter().enumerate() {
+            if q_fam.queue_count > 0 && q_fam.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                found_grapics_q_index = Some(index as u32);
+            }
+            if q_fam.queue_count > 0 && q_fam.queue_flags.contains(vk::QueueFlags::TRANSFER) {
+                if found_transfer_q_index.is_none()
+                    || !q_fam.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                {
+                    found_transfer_q_index = Some(index as u32);
+                }
+            }
+        }
+        (
+            found_grapics_q_index.unwrap(),
+            found_transfer_q_index.unwrap(),
+        )
+    };
+
+    // create a logical device as primary interface to gpu
+    let priorities = [1.0f32];
+    let queue_infos = [
+        // GRAPHICS QUEUE
+        // TODO: use only one DeviceQueueCreateInfo
+        vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(q_fam_indicies.0)
+            .queue_priorities(&priorities)
+            .build(),
+        // TRANSFER QUEUE
+        vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(q_fam_indicies.1)
+            .queue_priorities(&priorities)
+            .build(),
+    ];
+    let device_create_info = vk::DeviceCreateInfo::builder()
+        .queue_create_infos(&queue_infos)
+        .enabled_layer_names(&layer_name_pointers);
+    let logical_device =
+        unsafe { instance.create_device(physical_device, &device_create_info, None)? };
+    let graphics_queue = unsafe { logical_device.get_device_queue(q_fam_indicies.0, 0) };
+    let transfer_queue = unsafe { logical_device.get_device_queue(q_fam_indicies.1, 0) };
+
+    // instance and device cleanup
     unsafe {
+        logical_device.destroy_device(None);
         debug_utils.destroy_debug_utils_messenger(utils_messenger, None);
         instance.destroy_instance(None)
     };
