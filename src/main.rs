@@ -7,7 +7,7 @@ use winapi::{shared::windef::HWND, um::libloaderapi::GetModuleHandleW};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::Window::new(&event_loop)?;
-    let fay = Fay::init(window)?;
+    let mut fay = Fay::init(window)?;
     use winit::event::{Event, WindowEvent};
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent {
@@ -21,12 +21,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fay.window.request_redraw();
         }
         Event::RedrawRequested(_) => {
-            // render here later
+            // whose turn is it to be seen
+            fay.swapchain.current_image =
+                (fay.swapchain.current_image + 1) % fay.swapchain.amount_of_images as usize;
+            // aquire the next image
+            let (image_index, _) = unsafe {
+                fay.swapchain
+                    .swapchain_loader
+                    .acquire_next_image(
+                        fay.swapchain.swapchain,
+                        std::u64::MAX,
+                        fay.swapchain.image_available[fay.swapchain.current_image],
+                        vk::Fence::null(),
+                    )
+                    .expect("image aquisition trouble")
+            };
+            unsafe {
+                // wait for fence
+                fay.device
+                    .wait_for_fences(
+                        &[fay.swapchain.may_begin_drawing[fay.swapchain.current_image]],
+                        true,
+                        std::u64::MAX,
+                    )
+                    .expect("fence-waiting");
+                // reset fence
+                fay.device
+                    .reset_fences(&[fay.swapchain.may_begin_drawing[fay.swapchain.current_image]])
+                    .expect("resetting fences");
+            };
+            // command buffer setup info
+            let semaphores_available = [fay.swapchain.image_available[fay.swapchain.current_image]];
+            let waiting_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let semaphores_finished =
+                [fay.swapchain.rendering_finished[fay.swapchain.current_image]];
+            let command_buffers = [fay.command_buffers[image_index as usize]];
+            let submit_info = [vk::SubmitInfo::builder()
+                .wait_semaphores(&semaphores_available)
+                .wait_dst_stage_mask(&waiting_stages)
+                .command_buffers(&command_buffers)
+                .signal_semaphores(&semaphores_finished)
+                .build()];
+            // submit command buffer
+            unsafe {
+                fay.device
+                    .queue_submit(
+                        fay.queues.graphics_queue,
+                        &submit_info,
+                        fay.swapchain.may_begin_drawing[fay.swapchain.current_image],
+                    )
+                    .expect("queue submission");
+            };
+            // present image to screen
+            let swapchains = [fay.swapchain.swapchain];
+            let indices = [image_index];
+            let present_info = vk::PresentInfoKHR::builder()
+                .wait_semaphores(&semaphores_finished)
+                .swapchains(&swapchains)
+                .image_indices(&indices);
+            unsafe {
+                fay.swapchain
+                    .swapchain_loader
+                    .queue_present(fay.queues.graphics_queue, &present_info)
+                    .expect("queue presentation");
+            };
         }
         _ => {}
     });
-
-    Ok(())
 }
 
 // external function call to setup validation layer callbacks
@@ -341,6 +402,11 @@ struct FaySwapchain {
     framebuffers: Vec<vk::Framebuffer>,
     surface_format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
+    image_available: Vec<vk::Semaphore>,
+    rendering_finished: Vec<vk::Semaphore>,
+    may_begin_drawing: Vec<vk::Fence>,
+    amount_of_images: u32,
+    current_image: usize,
 }
 
 impl FaySwapchain {
@@ -379,10 +445,9 @@ impl FaySwapchain {
 
         // get Vec of vkImages
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-
+        let amount_of_images = swapchain_images.len() as u32;
         //create ImageViews
-        let mut swapchain_image_views: Vec<vk::ImageView> =
-            Vec::with_capacity(swapchain_images.len());
+        let mut swapchain_image_views = Vec::with_capacity(swapchain_images.len());
         for image in &swapchain_images {
             let subresource_range = vk::ImageSubresourceRange::builder()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -399,6 +464,27 @@ impl FaySwapchain {
                 unsafe { logical_device.create_image_view(&image_view_create_info, None) }?;
             swapchain_image_views.push(image_view);
         }
+        // use semaphores for syncing image views
+        let mut image_available = vec![];
+        let mut rendering_finished = vec![];
+        let mut may_begin_drawing = vec![];
+        let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
+        // use fence to sync cpu and gpu
+        // set fence to signaled state
+        let fence_create_info =
+            vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+        // sync each image
+        for _ in 0..amount_of_images {
+            let semaphore_available =
+                unsafe { logical_device.create_semaphore(&semaphore_create_info, None) }?;
+            let semaphore_finished =
+                unsafe { logical_device.create_semaphore(&semaphore_create_info, None) }?;
+            image_available.push(semaphore_available);
+            rendering_finished.push(semaphore_finished);
+            let fence = unsafe { logical_device.create_fence(&fence_create_info, None) }?;
+            may_begin_drawing.push(fence);
+        }
+
         Ok(FaySwapchain {
             swapchain_loader,
             swapchain,
@@ -407,6 +493,11 @@ impl FaySwapchain {
             framebuffers: vec![],
             surface_format,
             extent,
+            amount_of_images,
+            current_image: 0,
+            image_available,
+            rendering_finished,
+            may_begin_drawing,
         })
     }
 
@@ -428,7 +519,17 @@ impl FaySwapchain {
         }
         Ok(())
     }
+
     unsafe fn cleanup(&mut self, logical_device: &ash::Device) {
+        for fence in &self.may_begin_drawing {
+            logical_device.destroy_fence(*fence, None);
+        }
+        for semaphore in &self.image_available {
+            logical_device.destroy_semaphore(*semaphore, None);
+        }
+        for semaphore in &self.rendering_finished {
+            logical_device.destroy_semaphore(*semaphore, None);
+        }
         for fb in &self.framebuffers {
             logical_device.destroy_framebuffer(*fb, None);
         }
@@ -443,18 +544,12 @@ impl FaySwapchain {
 fn init_render_pass(
     logical_device: &ash::Device,
     physical_device: vk::PhysicalDevice,
-    surfaces: &FaySurface,
+    format: vk::Format,
 ) -> Result<vk::RenderPass, vk::Result> {
     // create attachments (essentially render-target)
     let attachments = [vk::AttachmentDescription::builder()
         // format must be same as swapchain
-        .format(
-            surfaces
-                .get_formats(physical_device)?
-                .first()
-                .unwrap()
-                .format,
-        )
+        .format(format)
         .load_op(vk::AttachmentLoadOp::CLEAR)
         .store_op(vk::AttachmentStoreOp::STORE)
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -507,13 +602,13 @@ impl Pipeline {
     ) -> Result<Pipeline, vk::Result> {
         // create vertex shader module
         let vertex_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(
-            vk_shader_macros::include_glsl!("./shaders/shader.vert", kind: vert),
+            vk_shader_macros::include_glsl!("./shaders/shader.vert"),
         );
         let vertex_shader_module =
             unsafe { logical_device.create_shader_module(&vertex_shader_create_info, None)? };
         // create fragment shader module
         let fragment_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(
-            vk_shader_macros::include_glsl!("./shaders/shader.frag", kind: frag),
+            vk_shader_macros::include_glsl!("./shaders/shader.frag"),
         );
         let fragment_shader_module =
             unsafe { logical_device.create_shader_module(&fragment_shader_create_info, None)? };
@@ -571,7 +666,7 @@ impl Pipeline {
         // color blending and transparency
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
             .blend_enable(true)
-            .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
             .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
@@ -634,6 +729,104 @@ impl Pipeline {
     }
 }
 
+struct Pools {
+    command_pool_graphics: vk::CommandPool,
+    command_pool_transfer: vk::CommandPool,
+}
+
+impl Pools {
+    fn init(
+        logical_device: &ash::Device,
+        queue_families: &QueueFamilies,
+    ) -> Result<Pools, vk::Result> {
+        let graphics_command_pool_create_info = vk::CommandPoolCreateInfo::builder()
+            .queue_family_index(queue_families.graphics_q_index.unwrap())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let command_pool_graphics = unsafe {
+            logical_device.create_command_pool(&graphics_command_pool_create_info, None)
+        }?;
+        let transfer_command_pool_create_info = vk::CommandPoolCreateInfo::builder()
+            .queue_family_index(queue_families.transfer_q_index.unwrap())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let command_pool_transfer = unsafe {
+            logical_device.create_command_pool(&transfer_command_pool_create_info, None)
+        }?;
+
+        Ok(Pools {
+            command_pool_graphics,
+            command_pool_transfer,
+        })
+    }
+
+    fn cleanup(&self, logical_device: &ash::Device) {
+        unsafe {
+            logical_device.destroy_command_pool(self.command_pool_graphics, None);
+            logical_device.destroy_command_pool(self.command_pool_transfer, None);
+        }
+    }
+}
+
+fn create_command_buffers(
+    logical_device: &ash::Device,
+    pools: &Pools,
+    amount: usize,
+) -> Result<Vec<vk::CommandBuffer>, vk::Result> {
+    let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+        .command_pool(pools.command_pool_graphics)
+        .command_buffer_count(amount as u32);
+    unsafe { logical_device.allocate_command_buffers(&command_buffer_allocate_info) }
+}
+
+fn fill_command_buffers(
+    command_buffers: &[vk::CommandBuffer],
+    logical_device: &ash::Device,
+    render_pass: &vk::RenderPass,
+    swapchain: &FaySwapchain,
+    pipeline: &Pipeline,
+) -> Result<(), vk::Result> {
+    for (i, &command_buffer) in command_buffers.iter().enumerate() {
+        let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder();
+        unsafe {
+            logical_device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
+        }
+        //start render pass
+        let clear_values = [vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.08, 1.0],
+            },
+        }];
+        let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
+            .render_pass(*render_pass)
+            .framebuffer(swapchain.framebuffers[i])
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: swapchain.extent,
+            })
+            .clear_values(&clear_values);
+        // record that render pass has begun
+        // choose how command for first subpass are provided (INLINE)
+        unsafe {
+            logical_device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_begin_info,
+                vk::SubpassContents::INLINE,
+            );
+            // bind pipeline
+            logical_device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.pipeline,
+            );
+            // draw
+            logical_device.cmd_draw(command_buffer, 1, 1, 0, 0);
+            //end render pass and command buffer
+            logical_device.cmd_end_render_pass(command_buffer);
+            logical_device.end_command_buffer(command_buffer)?;
+        }
+    }
+    Ok(())
+}
+
 struct Fay {
     window: winit::window::Window,
     entry: ash::Entry,
@@ -648,6 +841,8 @@ struct Fay {
     swapchain: FaySwapchain,
     render_pass: vk::RenderPass,
     pipeline: Pipeline,
+    pools: Pools,
+    command_buffers: Vec<vk::CommandBuffer>,
 }
 
 impl Fay {
@@ -671,7 +866,7 @@ impl Fay {
         let (logical_device, queues) =
             init_device_and_queues(&instance, physical_device, &queue_families, &layer_names)?;
         // create swapchain
-        let swapchain = FaySwapchain::init(
+        let mut swapchain = FaySwapchain::init(
             &instance,
             physical_device,
             &logical_device,
@@ -680,9 +875,23 @@ impl Fay {
             &queues,
         )?;
         // create render pass
-        let render_pass = init_render_pass(&logical_device, physical_device, &surfaces)?;
+        let render_pass = init_render_pass(&logical_device, physical_device, swapchain.surface_format.format)?;
+        // create framebuffers
+        swapchain.create_framebuffers(&logical_device, render_pass)?;
         // create pipeline
         let pipeline = Pipeline::init(&logical_device, &swapchain, &render_pass)?;
+        // create command pools
+        let pools = Pools::init(&logical_device, &queue_families)?;
+        // create command buffers
+        let command_buffers =
+            create_command_buffers(&logical_device, &pools, swapchain.framebuffers.len())?;
+        fill_command_buffers(
+            &command_buffers,
+            &logical_device,
+            &render_pass,
+            &swapchain,
+            &pipeline,
+        )?;
 
         Ok(Fay {
             window,
@@ -698,6 +907,8 @@ impl Fay {
             swapchain,
             render_pass,
             pipeline,
+            pools,
+            command_buffers,
         })
     }
 }
@@ -705,6 +916,10 @@ impl Fay {
 impl Drop for Fay {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .device_wait_idle()
+                .expect("something wrong while waiting");
+            self.pools.cleanup(&self.device);
             self.pipeline.cleanup(&self.device);
             self.device.destroy_render_pass(self.render_pass, None);
             self.swapchain.cleanup(&self.device);
