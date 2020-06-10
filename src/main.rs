@@ -338,6 +338,9 @@ struct FaySwapchain {
     swapchain: vk::SwapchainKHR,
     images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
+    framebuffers: Vec<vk::Framebuffer>,
+    surface_format: vk::SurfaceFormatKHR,
+    extent: vk::Extent2D,
 }
 
 impl FaySwapchain {
@@ -351,8 +354,9 @@ impl FaySwapchain {
     ) -> Result<FaySwapchain, vk::Result> {
         // query surface information
         let surface_capabilites = surfaces.get_capabilities(physical_device)?;
+        let extent = surface_capabilites.current_extent;
         let surface_present_modes = surfaces.get_present_modes(physical_device)?;
-        let surface_formats = surfaces.get_formats(physical_device)?;
+        let surface_format = *surfaces.get_formats(physical_device)?.first().unwrap();
         let queue_families = [q_families.graphics_q_index.unwrap()];
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
             .surface(surfaces.surface)
@@ -360,9 +364,9 @@ impl FaySwapchain {
                 3.max(surface_capabilites.min_image_count)
                     .min(surface_capabilites.max_image_count),
             )
-            .image_format(surface_formats.first().unwrap().format)
-            .image_color_space(surface_formats.first().unwrap().color_space)
-            .image_extent(surface_capabilites.current_extent)
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
+            .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -400,14 +404,233 @@ impl FaySwapchain {
             swapchain,
             images: swapchain_images,
             image_views: swapchain_image_views,
+            framebuffers: vec![],
+            surface_format,
+            extent,
         })
     }
+
+    fn create_framebuffers(
+        &mut self,
+        logical_device: &ash::Device,
+        render_pass: vk::RenderPass,
+    ) -> Result<(), vk::Result> {
+        for iv in &self.image_views {
+            let i_view = [*iv];
+            let framebuffer_info = vk::FramebufferCreateInfo::builder()
+                .render_pass(render_pass)
+                .attachments(&i_view)
+                .width(self.extent.width)
+                .height(self.extent.height)
+                .layers(1);
+            let fb = unsafe { logical_device.create_framebuffer(&framebuffer_info, None) }?;
+            self.framebuffers.push(fb);
+        }
+        Ok(())
+    }
     unsafe fn cleanup(&mut self, logical_device: &ash::Device) {
+        for fb in &self.framebuffers {
+            logical_device.destroy_framebuffer(*fb, None);
+        }
         for iv in &self.image_views {
             logical_device.destroy_image_view(*iv, None);
         }
         self.swapchain_loader
             .destroy_swapchain(self.swapchain, None)
+    }
+}
+
+fn init_render_pass(
+    logical_device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
+    surfaces: &FaySurface,
+) -> Result<vk::RenderPass, vk::Result> {
+    // create attachments (essentially render-target)
+    let attachments = [vk::AttachmentDescription::builder()
+        // format must be same as swapchain
+        .format(
+            surfaces
+                .get_formats(physical_device)?
+                .first()
+                .unwrap()
+                .format,
+        )
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .build()];
+
+    let color_attachment_references = [vk::AttachmentReference {
+        attachment: 0,
+        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+    }];
+
+    // define subpasses
+    let subpasses = [vk::SubpassDescription::builder()
+        .color_attachments(&color_attachment_references)
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .build()];
+
+    let subpass_dependencies = [vk::SubpassDependency::builder()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_subpass(0)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        )
+        .build()];
+
+    let render_pass_create_info = vk::RenderPassCreateInfo::builder()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&subpass_dependencies);
+    let render_pass = unsafe { logical_device.create_render_pass(&render_pass_create_info, None)? };
+
+    Ok(render_pass)
+}
+
+struct Pipeline {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+}
+
+impl Pipeline {
+    fn init(
+        logical_device: &ash::Device,
+        swapchain: &FaySwapchain,
+        render_pass: &vk::RenderPass,
+    ) -> Result<Pipeline, vk::Result> {
+        // create vertex shader module
+        let vertex_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(
+            vk_shader_macros::include_glsl!("./shaders/shader.vert", kind: vert),
+        );
+        let vertex_shader_module =
+            unsafe { logical_device.create_shader_module(&vertex_shader_create_info, None)? };
+        // create fragment shader module
+        let fragment_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(
+            vk_shader_macros::include_glsl!("./shaders/shader.frag", kind: frag),
+        );
+        let fragment_shader_module =
+            unsafe { logical_device.create_shader_module(&fragment_shader_create_info, None)? };
+        // define what functiuon should be used as the entry point in the shader
+        let main_function_name = std::ffi::CString::new("main").unwrap();
+        // shader stage creation info
+        let vertex_shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vertex_shader_module)
+            .name(&main_function_name);
+        let fragment_shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fragment_shader_module)
+            .name(&main_function_name);
+        // create shader stages
+        let shader_stages = vec![
+            vertex_shader_stage_create_info.build(),
+            fragment_shader_stage_create_info.build(),
+        ];
+        // shader input creation info
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder();
+        // is topology points or triangles
+        let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::POINT_LIST);
+        // define what part of screen to correspond to internal coordinates
+        let viewports = [vk::Viewport {
+            x: 0.,
+            y: 0.,
+            width: swapchain.extent.width as f32,
+            height: swapchain.extent.height as f32,
+            min_depth: 0.,
+            max_depth: 1.,
+        }];
+        // define area that we can draw in
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: swapchain.extent,
+        }];
+        // viewport creation info
+        let viewport_create_info = vk::PipelineViewportStateCreateInfo::builder()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        // rasterizer creation info
+        let rasterizer_creation_info = vk::PipelineRasterizationStateCreateInfo::builder()
+            .line_width(1.0)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .polygon_mode(vk::PolygonMode::FILL);
+
+        // multisampler creation info
+        let multisampler_create_info = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        // color blending and transparency
+        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
+            .blend_enable(true)
+            .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .build()];
+        let color_blend_create_info =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&color_blend_attachments);
+
+        // data to pass to pipeline not attached to verticies
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
+        let pipeline_layout =
+            unsafe { logical_device.create_pipeline_layout(&pipeline_layout_info, None) }?;
+
+        // pipeline creation info
+        let pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_create_info)
+            .input_assembly_state(&input_assembly_create_info)
+            .viewport_state(&viewport_create_info)
+            .rasterization_state(&rasterizer_creation_info)
+            .multisample_state(&multisampler_create_info)
+            .color_blend_state(&color_blend_create_info)
+            .layout(pipeline_layout)
+            .render_pass(*render_pass)
+            .subpass(0);
+        let graphics_pipeline = unsafe {
+            logical_device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[pipeline_create_info.build()],
+                    None,
+                )
+                .expect("A problem occured with pipeline creation")
+        }[0];
+
+        // cleanup shader modules they are no loger needed after the pipeline creation
+        unsafe {
+            logical_device.destroy_shader_module(fragment_shader_module, None);
+            logical_device.destroy_shader_module(vertex_shader_module, None);
+        }
+
+        Ok(Pipeline {
+            pipeline: graphics_pipeline,
+            layout: pipeline_layout,
+        })
+    }
+
+    fn cleanup(&self, logical_device: &ash::Device) {
+        unsafe {
+            logical_device.destroy_pipeline(self.pipeline, None);
+            logical_device.destroy_pipeline_layout(self.layout, None);
+        }
     }
 }
 
@@ -423,6 +646,8 @@ struct Fay {
     queues: Queues,
     device: ash::Device,
     swapchain: FaySwapchain,
+    render_pass: vk::RenderPass,
+    pipeline: Pipeline,
 }
 
 impl Fay {
@@ -454,6 +679,11 @@ impl Fay {
             &queue_families,
             &queues,
         )?;
+        // create render pass
+        let render_pass = init_render_pass(&logical_device, physical_device, &surfaces)?;
+        // create pipeline
+        let pipeline = Pipeline::init(&logical_device, &swapchain, &render_pass)?;
+
         Ok(Fay {
             window,
             entry,
@@ -466,6 +696,8 @@ impl Fay {
             queues,
             device: logical_device,
             swapchain,
+            render_pass,
+            pipeline,
         })
     }
 }
@@ -473,6 +705,8 @@ impl Fay {
 impl Drop for Fay {
     fn drop(&mut self) {
         unsafe {
+            self.pipeline.cleanup(&self.device);
+            self.device.destroy_render_pass(self.render_pass, None);
             self.swapchain.cleanup(&self.device);
             self.device.destroy_device(None);
             std::mem::ManuallyDrop::drop(&mut self.surfaces);
