@@ -7,7 +7,7 @@ use winapi::{shared::windef::HWND, um::libloaderapi::GetModuleHandleW};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::Window::new(&event_loop)?;
-    let mut fay = Fay::init(window)?;
+    let mut fae = Fae::init(window)?;
     use winit::event::{Event, WindowEvent};
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent {
@@ -18,44 +18,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Event::MainEventsCleared => {
             //doing work here later
-            fay.window.request_redraw();
+            fae.window.request_redraw();
         }
         Event::RedrawRequested(_) => {
             // whose turn is it to be seen
-            fay.swapchain.current_image =
-                (fay.swapchain.current_image + 1) % fay.swapchain.amount_of_images as usize;
+            fae.swapchain.current_image =
+                (fae.swapchain.current_image + 1) % fae.swapchain.amount_of_images as usize;
             // aquire the next image
             let (image_index, _) = unsafe {
-                fay.swapchain
+                fae.swapchain
                     .swapchain_loader
                     .acquire_next_image(
-                        fay.swapchain.swapchain,
+                        fae.swapchain.swapchain,
                         std::u64::MAX,
-                        fay.swapchain.image_available[fay.swapchain.current_image],
+                        fae.swapchain.image_available[fae.swapchain.current_image],
                         vk::Fence::null(),
                     )
                     .expect("image aquisition trouble")
             };
             unsafe {
                 // wait for fence
-                fay.device
+                fae.device
                     .wait_for_fences(
-                        &[fay.swapchain.may_begin_drawing[fay.swapchain.current_image]],
+                        &[fae.swapchain.may_begin_drawing[fae.swapchain.current_image]],
                         true,
                         std::u64::MAX,
                     )
                     .expect("fence-waiting");
                 // reset fence
-                fay.device
-                    .reset_fences(&[fay.swapchain.may_begin_drawing[fay.swapchain.current_image]])
+                fae.device
+                    .reset_fences(&[fae.swapchain.may_begin_drawing[fae.swapchain.current_image]])
                     .expect("resetting fences");
             };
             // command buffer setup info
-            let semaphores_available = [fay.swapchain.image_available[fay.swapchain.current_image]];
+            let semaphores_available = [fae.swapchain.image_available[fae.swapchain.current_image]];
             let waiting_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let semaphores_finished =
-                [fay.swapchain.rendering_finished[fay.swapchain.current_image]];
-            let command_buffers = [fay.command_buffers[image_index as usize]];
+                [fae.swapchain.rendering_finished[fae.swapchain.current_image]];
+            let command_buffers = [fae.command_buffers[image_index as usize]];
             let submit_info = [vk::SubmitInfo::builder()
                 .wait_semaphores(&semaphores_available)
                 .wait_dst_stage_mask(&waiting_stages)
@@ -64,25 +64,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build()];
             // submit command buffer
             unsafe {
-                fay.device
+                fae.device
                     .queue_submit(
-                        fay.queues.graphics_queue,
+                        fae.queues.graphics_queue,
                         &submit_info,
-                        fay.swapchain.may_begin_drawing[fay.swapchain.current_image],
+                        fae.swapchain.may_begin_drawing[fae.swapchain.current_image],
                     )
                     .expect("queue submission");
             };
             // present image to screen
-            let swapchains = [fay.swapchain.swapchain];
+            let swapchains = [fae.swapchain.swapchain];
             let indices = [image_index];
             let present_info = vk::PresentInfoKHR::builder()
                 .wait_semaphores(&semaphores_finished)
                 .swapchains(&swapchains)
                 .image_indices(&indices);
             unsafe {
-                fay.swapchain
+                fae.swapchain
                     .swapchain_loader
-                    .queue_present(fay.queues.graphics_queue, &present_info)
+                    .queue_present(fae.queues.graphics_queue, &present_info)
                     .expect("queue presentation");
             };
         }
@@ -157,13 +157,13 @@ fn init_instance(
     unsafe { entry.create_instance(&instance_create_info, None) }
 }
 
-struct FayDebug {
+struct FaeDebug {
     loader: ash::extensions::ext::DebugUtils,
     messenger: vk::DebugUtilsMessengerEXT,
 }
 
-impl FayDebug {
-    fn init(entry: &ash::Entry, instance: &ash::Instance) -> Result<FayDebug, vk::Result> {
+impl FaeDebug {
+    fn init(entry: &ash::Entry, instance: &ash::Instance) -> Result<FaeDebug, vk::Result> {
         // setup debug messeges
         let debug_create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
             .message_severity(
@@ -182,11 +182,11 @@ impl FayDebug {
         let loader = ash::extensions::ext::DebugUtils::new(entry, instance);
         let messenger = unsafe { loader.create_debug_utils_messenger(&debug_create_info, None)? };
 
-        Ok(FayDebug { loader, messenger })
+        Ok(FaeDebug { loader, messenger })
     }
 }
 
-impl Drop for FayDebug {
+impl Drop for FaeDebug {
     fn drop(&mut self) {
         unsafe {
             self.loader
@@ -195,18 +195,18 @@ impl Drop for FayDebug {
     }
 }
 
-struct FaySurface {
+struct FaeSurface {
     win32_surface_loader: ash::extensions::khr::Win32Surface,
     surface: vk::SurfaceKHR,
     surface_loader: ash::extensions::khr::Surface,
 }
 
-impl FaySurface {
+impl FaeSurface {
     fn init(
         window: &winit::window::Window,
         entry: &ash::Entry,
         instance: &ash::Instance,
-    ) -> Result<FaySurface, vk::Result> {
+    ) -> Result<FaeSurface, vk::Result> {
         // TODO: make cross platform is currently windows only
         // TODO: use conditional compilation
         // create window surface
@@ -224,7 +224,7 @@ impl FaySurface {
         let surface =
             unsafe { win32_surface_loader.create_win32_surface(&win32_create_info, None) }?;
         let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
-        Ok(FaySurface {
+        Ok(FaeSurface {
             win32_surface_loader,
             surface,
             surface_loader,
@@ -272,7 +272,7 @@ impl FaySurface {
     }
 }
 
-impl Drop for FaySurface {
+impl Drop for FaeSurface {
     fn drop(&mut self) {
         unsafe {
             self.surface_loader.destroy_surface(self.surface, None);
@@ -303,7 +303,7 @@ impl QueueFamilies {
     fn init(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
-        surfaces: &FaySurface,
+        surfaces: &FaeSurface,
     ) -> Result<QueueFamilies, vk::Result> {
         // TODO: this could be done like in the ash examples to make sure
         // physical device is surface and graphics capable
@@ -394,7 +394,7 @@ fn init_device_and_queues(
     ))
 }
 
-struct FaySwapchain {
+struct FaeSwapchain {
     swapchain_loader: ash::extensions::khr::Swapchain,
     swapchain: vk::SwapchainKHR,
     images: Vec<vk::Image>,
@@ -409,15 +409,15 @@ struct FaySwapchain {
     current_image: usize,
 }
 
-impl FaySwapchain {
+impl FaeSwapchain {
     fn init(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         logical_device: &ash::Device,
-        surfaces: &FaySurface,
+        surfaces: &FaeSurface,
         q_families: &QueueFamilies,
         queues: &Queues,
-    ) -> Result<FaySwapchain, vk::Result> {
+    ) -> Result<FaeSwapchain, vk::Result> {
         // query surface information
         let surface_capabilites = surfaces.get_capabilities(physical_device)?;
         let extent = surface_capabilites.current_extent;
@@ -485,7 +485,7 @@ impl FaySwapchain {
             may_begin_drawing.push(fence);
         }
 
-        Ok(FaySwapchain {
+        Ok(FaeSwapchain {
             swapchain_loader,
             swapchain,
             images: swapchain_images,
@@ -597,7 +597,7 @@ struct Pipeline {
 impl Pipeline {
     fn init(
         logical_device: &ash::Device,
-        swapchain: &FaySwapchain,
+        swapchain: &FaeSwapchain,
         render_pass: &vk::RenderPass,
     ) -> Result<Pipeline, vk::Result> {
         // create vertex shader module
@@ -781,7 +781,7 @@ fn fill_command_buffers(
     command_buffers: &[vk::CommandBuffer],
     logical_device: &ash::Device,
     render_pass: &vk::RenderPass,
-    swapchain: &FaySwapchain,
+    swapchain: &FaeSwapchain,
     pipeline: &Pipeline,
 ) -> Result<(), vk::Result> {
     for (i, &command_buffer) in command_buffers.iter().enumerate() {
@@ -827,26 +827,26 @@ fn fill_command_buffers(
     Ok(())
 }
 
-struct Fay {
+struct Fae {
     window: winit::window::Window,
     entry: ash::Entry,
     instance: ash::Instance,
-    debug: std::mem::ManuallyDrop<FayDebug>,
-    surfaces: std::mem::ManuallyDrop<FaySurface>,
+    debug: std::mem::ManuallyDrop<FaeDebug>,
+    surfaces: std::mem::ManuallyDrop<FaeSurface>,
     physical_device: vk::PhysicalDevice,
     physical_device_properties: vk::PhysicalDeviceProperties,
     queue_families: QueueFamilies,
     queues: Queues,
     device: ash::Device,
-    swapchain: FaySwapchain,
+    swapchain: FaeSwapchain,
     render_pass: vk::RenderPass,
     pipeline: Pipeline,
     pools: Pools,
     command_buffers: Vec<vk::CommandBuffer>,
 }
 
-impl Fay {
-    fn init(window: winit::window::Window) -> Result<Fay, Box<dyn std::error::Error>> {
+impl Fae {
+    fn init(window: winit::window::Window) -> Result<Fae, Box<dyn std::error::Error>> {
         // create vulkan entry
         let entry = ash::Entry::new()?;
         // layer names to enable
@@ -854,9 +854,9 @@ impl Fay {
         // create vulkan instance
         let instance = init_instance(&entry, &layer_names)?;
         // create debug messenger instance
-        let debug = FayDebug::init(&entry, &instance)?;
+        let debug = FaeDebug::init(&entry, &instance)?;
         // create surface instance
-        let surfaces = FaySurface::init(&window, &entry, &instance)?;
+        let surfaces = FaeSurface::init(&window, &entry, &instance)?;
         // init physical rendering device and properties
         let (physical_device, physical_device_properties) =
             init_physical_device_and_properties(&instance)?;
@@ -866,7 +866,7 @@ impl Fay {
         let (logical_device, queues) =
             init_device_and_queues(&instance, physical_device, &queue_families, &layer_names)?;
         // create swapchain
-        let mut swapchain = FaySwapchain::init(
+        let mut swapchain = FaeSwapchain::init(
             &instance,
             physical_device,
             &logical_device,
@@ -893,7 +893,7 @@ impl Fay {
             &pipeline,
         )?;
 
-        Ok(Fay {
+        Ok(Fae {
             window,
             entry,
             instance,
@@ -913,7 +913,7 @@ impl Fay {
     }
 }
 
-impl Drop for Fay {
+impl Drop for Fae {
     fn drop(&mut self) {
         unsafe {
             self.device
