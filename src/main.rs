@@ -282,14 +282,22 @@ impl Drop for FaeSurface {
 
 fn init_physical_device_and_properties(
     instance: &ash::Instance,
-) -> Result<(vk::PhysicalDevice, vk::PhysicalDeviceProperties), vk::Result> {
+) -> Result<
+    (
+        vk::PhysicalDevice,
+        vk::PhysicalDeviceProperties,
+        vk::PhysicalDeviceFeatures,
+    ),
+    vk::Result,
+> {
     // pick gpu to use (in this case it the discrete gpu)
     let phys_devs = unsafe { instance.enumerate_physical_devices()? };
     let mut chosen = None;
     for p in phys_devs {
         let properties = unsafe { instance.get_physical_device_properties(p) };
+        let features = unsafe { instance.get_physical_device_features(p) };
         if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
-            chosen = Some((p, properties));
+            chosen = Some((p, properties, features));
         }
     }
     Ok(chosen.unwrap())
@@ -372,13 +380,15 @@ fn init_device_and_queues(
             .build(),
     ];
 
+    let features = vk::PhysicalDeviceFeatures::builder().fill_mode_non_solid(true);
     // device creation
     let device_extension_name_pointers: Vec<*const i8> =
         vec![ash::extensions::khr::Swapchain::name().as_ptr()];
     let device_create_info = vk::DeviceCreateInfo::builder()
         .queue_create_infos(&queue_infos)
         .enabled_extension_names(&device_extension_name_pointers)
-        .enabled_layer_names(&layer_name_pointers);
+        .enabled_layer_names(&layer_name_pointers)
+        .enabled_features(&features);
     let logical_device =
         unsafe { instance.create_device(physical_device, &device_create_info, None)? };
     let graphics_queue =
@@ -601,15 +611,13 @@ impl Pipeline {
         render_pass: &vk::RenderPass,
     ) -> Result<Pipeline, vk::Result> {
         // create vertex shader module
-        let vertex_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(
-            vk_shader_macros::include_glsl!("./shaders/shader.vert"),
-        );
+        let vertex_shader_create_info = vk::ShaderModuleCreateInfo::builder()
+            .code(vk_shader_macros::include_glsl!("./shaders/shader.vert"));
         let vertex_shader_module =
             unsafe { logical_device.create_shader_module(&vertex_shader_create_info, None)? };
         // create fragment shader module
-        let fragment_shader_create_info = vk::ShaderModuleCreateInfo::builder().code(
-            vk_shader_macros::include_glsl!("./shaders/shader.frag"),
-        );
+        let fragment_shader_create_info = vk::ShaderModuleCreateInfo::builder()
+            .code(vk_shader_macros::include_glsl!("./shaders/shader.frag"));
         let fragment_shader_module =
             unsafe { logical_device.create_shader_module(&fragment_shader_create_info, None)? };
         // define what functiuon should be used as the entry point in the shader
@@ -628,11 +636,48 @@ impl Pipeline {
             vertex_shader_stage_create_info.build(),
             fragment_shader_stage_create_info.build(),
         ];
+
+        //setup data to pass to vertex shader
+        let vertex_attrib_descs = [
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 0,
+                offset: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 1,
+                offset: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 2,
+                offset: 12,
+                format: vk::Format::R32G32B32_SFLOAT,
+            },
+        ];
+
+        let vertex_binding_descs = [
+            vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: 12,
+                input_rate: vk::VertexInputRate::VERTEX,
+            },
+            vk::VertexInputBindingDescription {
+                binding: 1,
+                stride: 24,
+                input_rate: vk::VertexInputRate::INSTANCE,
+            },
+        ];
         // shader input creation info
-        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder();
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_attribute_descriptions(&vertex_attrib_descs)
+            .vertex_binding_descriptions(&vertex_binding_descs);
         // is topology points or triangles
         let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
-            .topology(vk::PrimitiveTopology::POINT_LIST);
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         // define what part of screen to correspond to internal coordinates
         let viewports = [vk::Viewport {
             x: 0.,
@@ -769,7 +814,7 @@ impl Pools {
 fn create_command_buffers(
     logical_device: &ash::Device,
     pools: &Pools,
-    amount: usize,
+    amount: u32,
 ) -> Result<Vec<vk::CommandBuffer>, vk::Result> {
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
         .command_pool(pools.command_pool_graphics)
@@ -783,6 +828,7 @@ fn fill_command_buffers(
     render_pass: &vk::RenderPass,
     swapchain: &FaeSwapchain,
     pipeline: &Pipeline,
+    models: &Vec<Model<[f32; 3], InstanceData>>,
 ) -> Result<(), vk::Result> {
     for (i, &command_buffer) in command_buffers.iter().enumerate() {
         let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder();
@@ -817,14 +863,314 @@ fn fill_command_buffers(
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.pipeline,
             );
-            // draw
-            logical_device.cmd_draw(command_buffer, 1, 1, 0, 0);
+            for m in models {
+                m.draw(logical_device, command_buffer);
+            }
             //end render pass and command buffer
             logical_device.cmd_end_render_pass(command_buffer);
             logical_device.end_command_buffer(command_buffer)?;
         }
     }
     Ok(())
+}
+
+struct Buffer {
+    buffer: vk::Buffer,
+    allocation: vk_mem::Allocation,
+    allocation_info: vk_mem::AllocationInfo,
+    size_in_bytes: u64,
+    buffer_usage: vk::BufferUsageFlags,
+    memory_usage: vk_mem::MemoryUsage,
+}
+impl Buffer {
+    fn new(
+        allocator: &vk_mem::Allocator,
+        size_in_bytes: u64,
+        buffer_usage: vk::BufferUsageFlags,
+        memory_usage: vk_mem::MemoryUsage,
+    ) -> Result<Buffer, vk_mem::error::Error> {
+        let allocation_create_info = vk_mem::AllocationCreateInfo {
+            usage: memory_usage,
+            ..Default::default()
+        };
+
+        // create buffer
+        let (buffer, allocation, allocation_info) = allocator.create_buffer(
+            &ash::vk::BufferCreateInfo::builder()
+                .size(size_in_bytes)
+                .usage(buffer_usage)
+                .build(),
+            &allocation_create_info,
+        )?;
+        Ok(Buffer {
+            buffer,
+            allocation,
+            allocation_info,
+            size_in_bytes,
+            buffer_usage,
+            memory_usage,
+        })
+    }
+
+    fn fill<T: Sized>(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+        data: &[T],
+    ) -> Result<(), vk_mem::error::Error> {
+        let bytes_to_write = (data.len() * std::mem::size_of::<T>()) as u64;
+        if bytes_to_write > self.size_in_bytes {
+            allocator.destroy_buffer(self.buffer, &self.allocation)?;
+            let new_buffer = Buffer::new(
+                allocator,
+                bytes_to_write,
+                self.buffer_usage,
+                self.memory_usage,
+            )?;
+            *self = new_buffer;
+        }
+        let data_ptr = allocator.map_memory(&self.allocation)? as *mut T;
+        unsafe { data_ptr.copy_from_nonoverlapping(data.as_ptr(), data.len()) };
+        allocator.unmap_memory(&self.allocation)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InvalidHandle;
+impl std::fmt::Display for InvalidHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "invalid handle")
+    }
+}
+impl std::error::Error for InvalidHandle {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
+
+struct Model<V, I> {
+    vertex_data: Vec<V>,
+    handle_to_index: std::collections::HashMap<usize, usize>,
+    handles: Vec<usize>,
+    instances: Vec<I>,
+    first_invisible: usize,
+    next_handle: usize,
+    vertex_buffer: Option<Buffer>,
+    instance_buffer: Option<Buffer>,
+}
+
+impl<V, I> Model<V, I> {
+    fn get(&self, handle: usize) -> Option<&I> {
+        if let Some(&index) = self.handle_to_index.get(&handle) {
+            self.instances.get(index)
+        } else {
+            None
+        }
+    }
+    fn get_mut(&mut self, handle: usize) -> Option<&mut I> {
+        if let Some(&index) = self.handle_to_index.get(&handle) {
+            self.instances.get_mut(index)
+        } else {
+            None
+        }
+    }
+    fn swap_by_handle(&mut self, handle1: usize, handle2: usize) -> Result<(), InvalidHandle> {
+        if handle1 == handle2 {
+            return Ok(());
+        }
+        if let (Some(&index1), Some(&index2)) = (
+            self.handle_to_index.get(&handle1),
+            self.handle_to_index.get(&handle2),
+        ) {
+            self.handles.swap(index1, index2);
+            self.instances.swap(index1, index2);
+            self.handle_to_index.insert(index1, handle2);
+            self.handle_to_index.insert(index2, handle1);
+            Ok(())
+        } else {
+            Err(InvalidHandle)
+        }
+    }
+    fn swap_by_index(&mut self, index1: usize, index2: usize) {
+        if index1 == index2 {
+            return;
+        }
+        let handle1 = self.handles[index1];
+        let handle2 = self.handles[index2];
+        self.handles.swap(index1, index2);
+        self.instances.swap(index1, handle2);
+        self.handle_to_index.insert(index1, handle2);
+        self.handle_to_index.insert(index2, handle1);
+    }
+    fn is_visible(&self, handle: usize) -> Result<bool, InvalidHandle> {
+        if let Some(index) = self.handle_to_index.get(&handle) {
+            Ok(index < &self.first_invisible)
+        } else {
+            Err(InvalidHandle)
+        }
+    }
+    fn make_visible(&mut self, handle: usize) -> Result<(), InvalidHandle> {
+        // if already visible do nothing
+        if let Some(&index) = self.handle_to_index.get(&handle) {
+            if index < self.first_invisible {
+                return Ok(());
+            }
+            // else move position first_invisible and increase value of first_invisible
+            self.swap_by_index(index, self.first_invisible);
+            self.first_invisible += 1;
+            Ok(())
+        } else {
+            Err(InvalidHandle)
+        }
+    }
+    fn make_invisible(&mut self, handle: usize) -> Result<(), InvalidHandle> {
+        // if already invisible do nothing
+        if let Some(&index) = self.handle_to_index.get(&handle) {
+            if index >= self.first_invisible {
+                return Ok(());
+            }
+            // else move position before first_invisible and decrease value of first_invisible
+            self.swap_by_index(index, self.first_invisible - 1);
+            self.first_invisible -= 1;
+            Ok(())
+        } else {
+            Err(InvalidHandle)
+        }
+    }
+    fn insert(&mut self, element: I) -> usize {
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        let index = self.instances.len();
+        self.instances.push(element);
+        self.handles.push(handle);
+        self.handle_to_index.insert(handle, index);
+        handle
+    }
+    fn insert_visibly(&mut self, element: I) -> usize {
+        let new_handle = self.insert(element);
+        self.make_visible(new_handle).ok(); //cant go wrong, see previous line
+        new_handle
+    }
+    fn remove(&mut self, handle: usize) -> Result<I, InvalidHandle> {
+        if let Some(&index) = self.handle_to_index.get(&handle) {
+            if index < self.first_invisible {
+                self.swap_by_index(index, self.first_invisible - 1);
+                self.first_invisible -= 1;
+            }
+            self.swap_by_index(self.first_invisible, self.instances.len() - 1);
+            self.handles.pop();
+            self.handle_to_index.remove(&handle);
+            //must be Some(), otherwise we couldnt have found and index
+            Ok(self.instances.pop().unwrap())
+        } else {
+            Err(InvalidHandle)
+        }
+    }
+    fn update_vertex_buffer(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+    ) -> Result<(), vk_mem::error::Error> {
+        if let Some(buffer) = &mut self.vertex_buffer {
+            buffer.fill(allocator, &self.vertex_data)?;
+            Ok(())
+        } else {
+            let bytes = (self.vertex_data.len() * std::mem::size_of::<V>()) as u64;
+            let mut buffer = Buffer::new(
+                &allocator,
+                bytes,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk_mem::MemoryUsage::CpuToGpu,
+            )?;
+            buffer.fill(allocator, &self.vertex_data)?;
+            self.vertex_buffer = Some(buffer);
+            Ok(())
+        }
+    }
+    fn update_instance_buffer(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+    ) -> Result<(), vk_mem::error::Error> {
+        if let Some(buffer) = &mut self.instance_buffer {
+            buffer.fill(allocator, &self.instances[0..self.first_invisible])?;
+            Ok(())
+        } else {
+            let bytes = (self.first_invisible * std::mem::size_of::<I>()) as u64;
+            let mut buffer = Buffer::new(
+                &allocator,
+                bytes,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk_mem::MemoryUsage::CpuToGpu,
+            )?;
+            buffer.fill(allocator, &self.instances[0..self.first_invisible])?;
+            self.instance_buffer = Some(buffer);
+            Ok(())
+        }
+    }
+    fn draw(&self, logical_device: &ash::Device, command_buffer: vk::CommandBuffer) {
+        if let Some(vertex_buffer) = &self.vertex_buffer {
+            if let Some(instance_buffer) = &self.instance_buffer {
+                if self.first_invisible > 0 {
+                    unsafe {
+                        logical_device.cmd_bind_vertex_buffers(
+                            command_buffer,
+                            0,
+                            &[vertex_buffer.buffer],
+                            &[0],
+                        );
+                        logical_device.cmd_bind_vertex_buffers(
+                            command_buffer,
+                            1,
+                            &[instance_buffer.buffer],
+                            &[0],
+                        );
+                        logical_device.cmd_draw(
+                            command_buffer,
+                            self.vertex_data.len() as u32,
+                            self.first_invisible as u32,
+                            0,
+                            0,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Model<[f32; 3], InstanceData> {
+    fn cube() -> Model<[f32; 3], InstanceData> {
+        let lbf = [-0.1, 0.1, 0.0]; //lbf: left-bottom-front
+        let lbb = [-0.1, 0.1, 0.1];
+        let ltf = [-0.1, -0.1, 0.0];
+        let ltb = [-0.1, -0.1, 0.1];
+        let rbf = [0.1, 0.1, 0.0];
+        let rbb = [0.1, 0.1, 0.1];
+        let rtf = [0.1, -0.1, 0.0];
+        let rtb = [0.1, -0.1, 0.1];
+        Model {
+            vertex_data: vec![
+                lbf, lbb, rbb, lbf, rbb, rbf, //bottom
+                ltf, rtb, ltb, ltf, rtf, rtb, //top
+                lbf, rtf, ltf, lbf, rbf, rtf, //front
+                lbb, ltb, rtb, lbb, rtb, rbb, //back
+                lbf, ltf, lbb, lbb, ltf, ltb, //left
+                rbf, rbb, rtf, rbb, rtb, rtf, //right
+            ],
+            handle_to_index: std::collections::HashMap::new(),
+            handles: Vec::new(),
+            instances: Vec::new(),
+            first_invisible: 0,
+            next_handle: 0,
+            vertex_buffer: None,
+            instance_buffer: None,
+        }
+    }
+}
+
+#[repr(C)]
+struct InstanceData {
+    position: [f32; 3],
+    color: [f32; 3],
 }
 
 struct Fae {
@@ -843,6 +1189,8 @@ struct Fae {
     pipeline: Pipeline,
     pools: Pools,
     command_buffers: Vec<vk::CommandBuffer>,
+    allocator: vk_mem::Allocator,
+    models: Vec<Model<[f32; 3], InstanceData>>,
 }
 
 impl Fae {
@@ -858,7 +1206,7 @@ impl Fae {
         // create surface instance
         let surfaces = FaeSurface::init(&window, &entry, &instance)?;
         // init physical rendering device and properties
-        let (physical_device, physical_device_properties) =
+        let (physical_device, physical_device_properties, physical_device_features) =
             init_physical_device_and_properties(&instance)?;
         // create queue family instance
         let queue_families = QueueFamilies::init(&instance, physical_device, &surfaces)?;
@@ -875,22 +1223,59 @@ impl Fae {
             &queues,
         )?;
         // create render pass
-        let render_pass = init_render_pass(&logical_device, physical_device, swapchain.surface_format.format)?;
+        let render_pass = init_render_pass(
+            &logical_device,
+            physical_device,
+            swapchain.surface_format.format,
+        )?;
         // create framebuffers
         swapchain.create_framebuffers(&logical_device, render_pass)?;
         // create pipeline
         let pipeline = Pipeline::init(&logical_device, &swapchain, &render_pass)?;
         // create command pools
         let pools = Pools::init(&logical_device, &queue_families)?;
+
+        // create allocator
+        let allocator_create_info = vk_mem::AllocatorCreateInfo {
+            physical_device,
+            device: logical_device.clone(),
+            instance: instance.clone(),
+            ..Default::default()
+        };
+        let allocator = vk_mem::Allocator::new(&allocator_create_info)?;
+
+        let allocation_create_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::CpuToGpu,
+            ..Default::default()
+        };
+
+        let mut cube = Model::cube();
+        cube.insert_visibly(InstanceData {
+            position: [0.0, 0.0, 0.0],
+            color: [1.0, 0.0, 0.0],
+        });
+        cube.insert_visibly(InstanceData {
+            position: [0.0, 0.25, 0.0],
+            color: [0.6, 0.5, 0.0],
+        });
+        cube.insert_visibly(InstanceData {
+            position: [0.0, 0.5, 0.0],
+            color: [0.0, 0.5, 0.0],
+        });
+        cube.update_vertex_buffer(&allocator)?;
+        cube.update_instance_buffer(&allocator)?;
+        let models = vec![cube];
+
         // create command buffers
         let command_buffers =
-            create_command_buffers(&logical_device, &pools, swapchain.framebuffers.len())?;
+            create_command_buffers(&logical_device, &pools, swapchain.amount_of_images)?;
         fill_command_buffers(
             &command_buffers,
             &logical_device,
             &render_pass,
             &swapchain,
             &pipeline,
+            &models,
         )?;
 
         Ok(Fae {
@@ -909,6 +1294,8 @@ impl Fae {
             pipeline,
             pools,
             command_buffers,
+            allocator,
+            models,
         })
     }
 }
@@ -919,6 +1306,19 @@ impl Drop for Fae {
             self.device
                 .device_wait_idle()
                 .expect("something wrong while waiting");
+            for m in &self.models {
+                if let Some(vb) = &m.vertex_buffer {
+                    self.allocator
+                        .destroy_buffer(vb.buffer, &vb.allocation)
+                        .expect("problem with buffer destruction")
+                }
+                if let Some(ib) = &m.instance_buffer {
+                    self.allocator
+                        .destroy_buffer(ib.buffer, &ib.allocation)
+                        .expect("problem with buffer destruction");
+                }
+            }
+            self.allocator.destroy();
             self.pools.cleanup(&self.device);
             self.pipeline.cleanup(&self.device);
             self.device.destroy_render_pass(self.render_pass, None);
