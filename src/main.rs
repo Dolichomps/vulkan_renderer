@@ -643,19 +643,37 @@ impl Pipeline {
                 binding: 0,
                 location: 0,
                 offset: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
+                format: vk::Format::R32G32B32A32_SFLOAT,
             },
             vk::VertexInputAttributeDescription {
                 binding: 1,
                 location: 1,
                 offset: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
+                format: vk::Format::R32G32B32A32_SFLOAT,
             },
             vk::VertexInputAttributeDescription {
                 binding: 1,
                 location: 2,
-                offset: 12,
-                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 16,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 3,
+                offset: 32,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 4,
+                offset: 48,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 1,
+                location: 5,
+                offset: 64,
+                format: vk::Format::R32G32B32A32_SFLOAT,
             },
         ];
 
@@ -667,7 +685,7 @@ impl Pipeline {
             },
             vk::VertexInputBindingDescription {
                 binding: 1,
-                stride: 24,
+                stride: 76,
                 input_rate: vk::VertexInputRate::INSTANCE,
             },
         ];
@@ -1139,14 +1157,14 @@ impl<V, I> Model<V, I> {
 
 impl Model<[f32; 3], InstanceData> {
     fn cube() -> Model<[f32; 3], InstanceData> {
-        let lbf = [-0.1, 0.1, 0.0]; //lbf: left-bottom-front
-        let lbb = [-0.1, 0.1, 0.1];
-        let ltf = [-0.1, -0.1, 0.0];
-        let ltb = [-0.1, -0.1, 0.1];
-        let rbf = [0.1, 0.1, 0.0];
-        let rbb = [0.1, 0.1, 0.1];
-        let rtf = [0.1, -0.1, 0.0];
-        let rtb = [0.1, -0.1, 0.1];
+        let lbf = [-1.0, 1.0, 0.0]; //lbf: left-bottom-front
+        let lbb = [-1.0, 1.0, 1.0];
+        let ltf = [-1.0, -1.0, 0.0];
+        let ltb = [-1.0, -1.0, 1.0];
+        let rbf = [1.0, 1.0, 0.0];
+        let rbb = [1.0, 1.0, 1.0];
+        let rtf = [1.0, -1.0, 0.0];
+        let rtb = [1.0, -1.0, 1.0];
         Model {
             vertex_data: vec![
                 lbf, lbb, rbb, lbf, rbb, rbf, //bottom
@@ -1169,7 +1187,7 @@ impl Model<[f32; 3], InstanceData> {
 
 #[repr(C)]
 struct InstanceData {
-    position: [f32; 3],
+    model_matrix: [[f32; 4]; 4],
     color: [f32; 3],
 }
 
@@ -1251,16 +1269,16 @@ impl Fae {
 
         let mut cube = Model::cube();
         cube.insert_visibly(InstanceData {
-            position: [0.0, 0.0, 0.0],
-            color: [1.0, 0.0, 0.0],
+            model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.1))
+                * nalgebra::Matrix4::new_scaling(0.1))
+            .into(),
+            color: [0.2, 0.4, 1.0],
         });
         cube.insert_visibly(InstanceData {
-            position: [0.0, 0.25, 0.0],
-            color: [0.6, 0.5, 0.0],
-        });
-        cube.insert_visibly(InstanceData {
-            position: [0.0, 0.5, 0.0],
-            color: [0.0, 0.5, 0.0],
+            model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.05, 0.05, 0.0))
+                * nalgebra::Matrix4::new_scaling(0.1))
+            .into(),
+            color: [1.0, 1.0, 0.2],
         });
         cube.update_vertex_buffer(&allocator)?;
         cube.update_instance_buffer(&allocator)?;
