@@ -8,6 +8,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::Window::new(&event_loop)?;
     let mut fae = Fae::init(window)?;
+    let mut cube = Model::cube();
+    let mut angle = 0.2;
+    let my_special_cube = cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle))
+            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
+            * nalgebra::Matrix4::new_scaling(0.1))
+        .into(),
+        color: [0.0, 0.5, 0.0],
+    });
+    let my_special_cube_too = cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle))
+            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
+            * nalgebra::Matrix4::new_scaling(0.1))
+        .into(),
+        color: [1.0, 0.0, 0.5],
+    });
+    cube.update_vertex_buffer(&fae.allocator)?;
+    cube.update_instance_buffer(&fae.allocator)?;
+    fae.models = vec![cube];
     use winit::event::{Event, WindowEvent};
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent {
@@ -17,13 +36,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *controlflow = winit::event_loop::ControlFlow::Exit;
         }
         Event::MainEventsCleared => {
-            //doing work here later
+            // do some rotation
+            angle += 0.01;
+            fae.models[0]
+                .get_mut(my_special_cube)
+                .unwrap()
+                .model_matrix = (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle))
+                * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
+                * nalgebra::Matrix4::new_scaling(0.1))
+            .into();
+            fae.models[0]
+                .get_mut(my_special_cube_too)
+                .unwrap()
+                .model_matrix = (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle * 2.0))
+                * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.1))
+                * nalgebra::Matrix4::new_scaling(0.1))
+            .into();
             fae.window.request_redraw();
         }
         Event::RedrawRequested(_) => {
-            // whose turn is it to be seen
-            fae.swapchain.current_image =
-                (fae.swapchain.current_image + 1) % fae.swapchain.amount_of_images as usize;
             // aquire the next image
             let (image_index, _) = unsafe {
                 fae.swapchain
@@ -50,6 +81,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .reset_fences(&[fae.swapchain.may_begin_drawing[fae.swapchain.current_image]])
                     .expect("resetting fences");
             };
+            for m in &mut fae.models {
+                m.update_instance_buffer(&fae.allocator);
+            }
+            //update command buffer
+            fae
+            .update_command_buffer(image_index as usize)
+            .expect("updateing the command buffer");
             // command buffer setup info
             let semaphores_available = [fae.swapchain.image_available[fae.swapchain.current_image]];
             let waiting_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -196,7 +234,6 @@ impl Drop for FaeDebug {
 }
 
 struct FaeSurface {
-    win32_surface_loader: ash::extensions::khr::Win32Surface,
     surface: vk::SurfaceKHR,
     surface_loader: ash::extensions::khr::Surface,
 }
@@ -225,7 +262,6 @@ impl FaeSurface {
             unsafe { win32_surface_loader.create_win32_surface(&win32_create_info, None) }?;
         let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
         Ok(FaeSurface {
-            win32_surface_loader,
             surface,
             surface_loader,
         })
@@ -409,6 +445,10 @@ struct FaeSwapchain {
     swapchain: vk::SwapchainKHR,
     images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
+    depth_image: vk::Image,
+    depth_image_allocation: vk_mem::Allocation,
+    depth_image_allocation_info: vk_mem::AllocationInfo,
+    depth_image_view: vk::ImageView,
     framebuffers: Vec<vk::Framebuffer>,
     surface_format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
@@ -427,6 +467,7 @@ impl FaeSwapchain {
         surfaces: &FaeSurface,
         q_families: &QueueFamilies,
         queues: &Queues,
+        allocator: &vk_mem::Allocator,
     ) -> Result<FaeSwapchain, vk::Result> {
         // query surface information
         let surface_capabilites = surfaces.get_capabilities(physical_device)?;
@@ -474,6 +515,45 @@ impl FaeSwapchain {
                 unsafe { logical_device.create_image_view(&image_view_create_info, None) }?;
             swapchain_image_views.push(image_view);
         }
+
+        let extent3d = vk::Extent3D {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+        };
+        let depth_image_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .extent(extent3d)
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_families);
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::GpuOnly,
+            ..Default::default()
+        };
+        let (depth_image, depth_image_allocation, depth_image_allocation_info) = allocator
+            .create_image(&depth_image_info, &allocation_info)
+            .unwrap();
+
+        let subresource_range = vk::ImageSubresourceRange::builder()
+            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let image_view_create_info = vk::ImageViewCreateInfo::builder()
+            .image(depth_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .subresource_range(*subresource_range);
+        let depth_image_view =
+            unsafe { logical_device.create_image_view(&image_view_create_info, None) }?;
+
         // use semaphores for syncing image views
         let mut image_available = vec![];
         let mut rendering_finished = vec![];
@@ -500,6 +580,10 @@ impl FaeSwapchain {
             swapchain,
             images: swapchain_images,
             image_views: swapchain_image_views,
+            depth_image,
+            depth_image_allocation,
+            depth_image_allocation_info,
+            depth_image_view,
             framebuffers: vec![],
             surface_format,
             extent,
@@ -517,7 +601,7 @@ impl FaeSwapchain {
         render_pass: vk::RenderPass,
     ) -> Result<(), vk::Result> {
         for iv in &self.image_views {
-            let i_view = [*iv];
+            let i_view = [*iv, self.depth_image_view];
             let framebuffer_info = vk::FramebufferCreateInfo::builder()
                 .render_pass(render_pass)
                 .attachments(&i_view)
@@ -530,7 +614,9 @@ impl FaeSwapchain {
         Ok(())
     }
 
-    unsafe fn cleanup(&mut self, logical_device: &ash::Device) {
+    unsafe fn cleanup(&mut self, logical_device: &ash::Device, allocator: &vk_mem::Allocator) {
+        logical_device.destroy_image_view(self.depth_image_view, None);
+        allocator.destroy_image(self.depth_image, &self.depth_image_allocation).unwrap();
         for fence in &self.may_begin_drawing {
             logical_device.destroy_fence(*fence, None);
         }
@@ -553,30 +639,48 @@ impl FaeSwapchain {
 
 fn init_render_pass(
     logical_device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
     format: vk::Format,
 ) -> Result<vk::RenderPass, vk::Result> {
     // create attachments (essentially render-target)
-    let attachments = [vk::AttachmentDescription::builder()
-        // format must be same as swapchain
-        .format(format)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
-        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .build()];
+    let attachments = [
+        vk::AttachmentDescription::builder()
+            // format must be same as swapchain
+            .format(format)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .build(),
+        //attachment for depth
+        vk::AttachmentDescription::builder()
+            .format(vk::Format::D32_SFLOAT)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .build(),
+    ];
 
     let color_attachment_references = [vk::AttachmentReference {
         attachment: 0,
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
     }];
 
+    let depth_attachment_reference = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
     // define subpasses
     let subpasses = [vk::SubpassDescription::builder()
         .color_attachments(&color_attachment_references)
+        .depth_stencil_attachment(&depth_attachment_reference)
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .build()];
 
@@ -749,7 +853,11 @@ impl Pipeline {
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
         let pipeline_layout =
             unsafe { logical_device.create_pipeline_layout(&pipeline_layout_info, None) }?;
-
+        
+        let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
         // pipeline creation info
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&shader_stages)
@@ -758,6 +866,7 @@ impl Pipeline {
             .viewport_state(&viewport_create_info)
             .rasterization_state(&rasterizer_creation_info)
             .multisample_state(&multisampler_create_info)
+            .depth_stencil_state(&depth_stencil_info)
             .color_blend_state(&color_blend_create_info)
             .layout(pipeline_layout)
             .render_pass(*render_pass)
@@ -840,62 +949,9 @@ fn create_command_buffers(
     unsafe { logical_device.allocate_command_buffers(&command_buffer_allocate_info) }
 }
 
-fn fill_command_buffers(
-    command_buffers: &[vk::CommandBuffer],
-    logical_device: &ash::Device,
-    render_pass: &vk::RenderPass,
-    swapchain: &FaeSwapchain,
-    pipeline: &Pipeline,
-    models: &Vec<Model<[f32; 3], InstanceData>>,
-) -> Result<(), vk::Result> {
-    for (i, &command_buffer) in command_buffers.iter().enumerate() {
-        let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder();
-        unsafe {
-            logical_device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
-        }
-        //start render pass
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.08, 1.0],
-            },
-        }];
-        let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-            .render_pass(*render_pass)
-            .framebuffer(swapchain.framebuffers[i])
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: swapchain.extent,
-            })
-            .clear_values(&clear_values);
-        // record that render pass has begun
-        // choose how command for first subpass are provided (INLINE)
-        unsafe {
-            logical_device.cmd_begin_render_pass(
-                command_buffer,
-                &render_pass_begin_info,
-                vk::SubpassContents::INLINE,
-            );
-            // bind pipeline
-            logical_device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline.pipeline,
-            );
-            for m in models {
-                m.draw(logical_device, command_buffer);
-            }
-            //end render pass and command buffer
-            logical_device.cmd_end_render_pass(command_buffer);
-            logical_device.end_command_buffer(command_buffer)?;
-        }
-    }
-    Ok(())
-}
-
 struct Buffer {
     buffer: vk::Buffer,
     allocation: vk_mem::Allocation,
-    allocation_info: vk_mem::AllocationInfo,
     size_in_bytes: u64,
     buffer_usage: vk::BufferUsageFlags,
     memory_usage: vk_mem::MemoryUsage,
@@ -923,7 +979,6 @@ impl Buffer {
         Ok(Buffer {
             buffer,
             allocation,
-            allocation_info,
             size_in_bytes,
             buffer_usage,
             memory_usage,
@@ -1231,28 +1286,6 @@ impl Fae {
         // create logical device and device queues
         let (logical_device, queues) =
             init_device_and_queues(&instance, physical_device, &queue_families, &layer_names)?;
-        // create swapchain
-        let mut swapchain = FaeSwapchain::init(
-            &instance,
-            physical_device,
-            &logical_device,
-            &surfaces,
-            &queue_families,
-            &queues,
-        )?;
-        // create render pass
-        let render_pass = init_render_pass(
-            &logical_device,
-            physical_device,
-            swapchain.surface_format.format,
-        )?;
-        // create framebuffers
-        swapchain.create_framebuffers(&logical_device, render_pass)?;
-        // create pipeline
-        let pipeline = Pipeline::init(&logical_device, &swapchain, &render_pass)?;
-        // create command pools
-        let pools = Pools::init(&logical_device, &queue_families)?;
-
         // create allocator
         let allocator_create_info = vk_mem::AllocatorCreateInfo {
             physical_device,
@@ -1266,35 +1299,30 @@ impl Fae {
             usage: vk_mem::MemoryUsage::CpuToGpu,
             ..Default::default()
         };
-
-        let mut cube = Model::cube();
-        cube.insert_visibly(InstanceData {
-            model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.1))
-                * nalgebra::Matrix4::new_scaling(0.1))
-            .into(),
-            color: [0.2, 0.4, 1.0],
-        });
-        cube.insert_visibly(InstanceData {
-            model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.05, 0.05, 0.0))
-                * nalgebra::Matrix4::new_scaling(0.1))
-            .into(),
-            color: [1.0, 1.0, 0.2],
-        });
-        cube.update_vertex_buffer(&allocator)?;
-        cube.update_instance_buffer(&allocator)?;
-        let models = vec![cube];
-
+        // create swapchain
+        let mut swapchain = FaeSwapchain::init(
+            &instance,
+            physical_device,
+            &logical_device,
+            &surfaces,
+            &queue_families,
+            &queues,
+            &allocator,
+        )?;
+        // create render pass
+        let render_pass = init_render_pass(
+            &logical_device,
+            swapchain.surface_format.format,
+        )?;
+        // create framebuffers
+        swapchain.create_framebuffers(&logical_device, render_pass)?;
+        // create pipeline
+        let pipeline = Pipeline::init(&logical_device, &swapchain, &render_pass)?;
+        // create command pools
+        let pools = Pools::init(&logical_device, &queue_families)?;
         // create command buffers
         let command_buffers =
             create_command_buffers(&logical_device, &pools, swapchain.amount_of_images)?;
-        fill_command_buffers(
-            &command_buffers,
-            &logical_device,
-            &render_pass,
-            &swapchain,
-            &pipeline,
-            &models,
-        )?;
 
         Ok(Fae {
             window,
@@ -1313,8 +1341,48 @@ impl Fae {
             pools,
             command_buffers,
             allocator,
-            models,
+            models: vec![],
         })
+    }
+
+    fn update_command_buffer(&mut self, index: usize) -> Result<(), vk::Result> {
+        let command_buffer = self.command_buffers[index];
+        let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder();
+        unsafe {
+            self.device
+                .begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
+        }
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.08, 1.0],
+                },
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        ];
+        let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
+            .render_pass(self.render_pass)
+            .framebuffer(self.swapchain.framebuffers[index])
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            })
+            .clear_values(&clear_values);
+        unsafe {
+            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
+            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            for m in &self.models {
+                m.draw(&self.device, command_buffer);
+            }
+            self.device.cmd_end_render_pass(command_buffer);
+            self.device.end_command_buffer(command_buffer)?;
+        }
+        Ok(())
     }
 }
 
@@ -1336,11 +1404,11 @@ impl Drop for Fae {
                         .expect("problem with buffer destruction");
                 }
             }
-            self.allocator.destroy();
             self.pools.cleanup(&self.device);
             self.pipeline.cleanup(&self.device);
             self.device.destroy_render_pass(self.render_pass, None);
-            self.swapchain.cleanup(&self.device);
+            self.swapchain.cleanup(&self.device, &self.allocator);
+            self.allocator.destroy();
             self.device.destroy_device(None);
             std::mem::ManuallyDrop::drop(&mut self.surfaces);
             std::mem::ManuallyDrop::drop(&mut self.debug);
