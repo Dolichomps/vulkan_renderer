@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::Window::new(&event_loop)?;
     let mut fae = Fae::init(window)?;
-    let mut camera = Camera::default();
+    let mut camera = Camera::builder().build();
     let mut cube = Model::cube();
     cube.insert_visibly(InstanceData {
         model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.1))
@@ -935,7 +935,8 @@ impl Pipeline {
         let desc_layouts = vec![descriptor_set_layout];
 
         // data to pass to pipeline not attached to verticies
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&desc_layouts);
+        let pipeline_layout_info =
+            vk::PipelineLayoutCreateInfo::builder().set_layouts(&desc_layouts);
         let pipeline_layout =
             unsafe { logical_device.create_pipeline_layout(&pipeline_layout_info, None) }?;
 
@@ -1336,26 +1337,128 @@ struct InstanceData {
     color: [f32; 3],
 }
 
+struct CameraBuilder {
+    position: nalgebra::Vector3<f32>,
+    view_direction: nalgebra::Unit<nalgebra::Vector3<f32>>,
+    down_direction: nalgebra::Unit<nalgebra::Vector3<f32>>,
+    fovy: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+}
+impl CameraBuilder {
+    fn build(self) -> Camera {
+        if self.far < self.near {
+            println!(
+                "far plane (at {}) closer than near plane (at {}) - is that right?",
+                self.far, self.near
+            );
+        }
+        let mut cam = Camera {
+            position: self.position,
+            view_direction: self.view_direction,
+            down_direction: nalgebra::Unit::new_normalize(
+                self.down_direction.as_ref()
+                    - self
+                        .down_direction
+                        .as_ref()
+                        .dot(self.view_direction.as_ref())
+                        * self.view_direction.as_ref(),
+            ),
+            fovy: self.fovy,
+            aspect: self.aspect,
+            near: self.near,
+            far: self.far,
+            view_matrix: nalgebra::Matrix4::identity(),
+            projection_matrix: nalgebra::Matrix4::identity(),
+        };
+        cam.update_projection_matrix();
+        cam.update_view_matrix();
+        cam
+    }
+    fn position(mut self, pos: nalgebra::Vector3<f32>) -> CameraBuilder {
+        self.position = pos;
+        self
+    }
+    fn fovy(mut self, fovy: f32) -> CameraBuilder {
+        self.fovy = fovy.max(0.01).min(std::f32::consts::PI - 0.01);
+        self
+    }
+    fn aspect(mut self, aspect: f32) -> CameraBuilder {
+        self.aspect = aspect;
+        self
+    }
+    fn near(mut self, near: f32) -> CameraBuilder {
+        if near <= 0.0 {
+            println!("setting near plane to negative value: {} - you sure?", near);
+        }
+        self.near = near;
+        self
+    }
+    fn far(mut self, far: f32) -> CameraBuilder {
+        if far <= 0.0 {
+            println!("setting far plane to negative value: {} - you sure?", far);
+        }
+        self.far = far;
+        self
+    }
+    fn view_direction(mut self, direction: nalgebra::Vector3<f32>) -> CameraBuilder {
+        self.view_direction = nalgebra::Unit::new_normalize(direction);
+        self
+    }
+    fn down_direction(mut self, direction: nalgebra::Vector3<f32>) -> CameraBuilder {
+        self.down_direction = nalgebra::Unit::new_normalize(direction);
+        self
+    }
+}
+
 struct Camera {
     view_matrix: nalgebra::Matrix4<f32>,
     position: nalgebra::Vector3<f32>,
     view_direction: nalgebra::Unit<nalgebra::Vector3<f32>>,
     down_direction: nalgebra::Unit<nalgebra::Vector3<f32>>,
-}
-impl Default for Camera {
-    fn default() -> Self {
-        Camera {
-            view_matrix: nalgebra::Matrix4::identity(),
-            position: nalgebra::Vector3::new(0.0, 0.0, 0.0),
-            view_direction: nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.0, 0.0, 1.0)),
-            down_direction: nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.0, 1.0, 0.0)),
-        }
-    }
+    fovy: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+    projection_matrix: nalgebra::Matrix4<f32>,
 }
 impl Camera {
+    fn builder() -> CameraBuilder {
+        CameraBuilder {
+            position: nalgebra::Vector3::new(0.0, -3.0, -3.0),
+            view_direction: nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.0, 1.0, 1.0)),
+            down_direction: nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.0, 1.0, -1.0)),
+            fovy: std::f32::consts::FRAC_PI_3,
+            aspect: 800.0 / 600.0,
+            near: 0.1,
+            far: 100.0,
+        }
+    }
     fn update_buffer(&self, allocator: &vk_mem::Allocator, buffer: &mut Buffer) {
-        let data: [[f32; 4]; 4] = self.view_matrix.into();
-        buffer.fill(allocator, &data);
+        let data: [[[f32; 4]; 4]; 2] = [self.view_matrix.into(), self.projection_matrix.into()];
+        buffer.fill(allocator, &data).unwrap();
+    }
+    fn update_projection_matrix(&mut self) {
+        let d = 1.0 / (0.5 * self.fovy).tan();
+        self.projection_matrix = nalgebra::Matrix4::new(
+            d / self.aspect,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            d,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            self.far / (self.far - self.near),
+            -self.near * self.far / (self.far - self.near),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+        );
     }
     fn update_view_matrix(&mut self) {
         let right = nalgebra::Unit::new_normalize(self.down_direction.cross(&self.view_direction));
@@ -1371,7 +1474,7 @@ impl Camera {
             self.view_direction.x,
             self.view_direction.y,
             self.view_direction.z,
-            self.view_direction.dot(&self.position), //
+            -self.view_direction.dot(&self.position), //
             0.0,
             0.0,
             0.0,
@@ -1483,15 +1586,18 @@ impl Fae {
         // create command buffers
         let command_buffers =
             create_command_buffers(&logical_device, &pools, swapchain.amount_of_images)?;
-        
-            // create uniform buffer
+
+        // create uniform buffer
         let mut uniform_buffer = Buffer::new(
             &allocator,
-            64,
+            128,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::CpuToGpu,
         )?;
-        let camera_transform: [[f32; 4]; 4] = nalgebra::Matrix4::identity().into();
+        let camera_transform: [[[f32; 4]; 4]; 2] = [
+            nalgebra::Matrix4::identity().into(),
+            nalgebra::Matrix4::identity().into(),
+        ];
         uniform_buffer.fill(&allocator, &camera_transform)?;
 
         let pool_sizes = [vk::DescriptorPoolSize {
@@ -1516,7 +1622,7 @@ impl Fae {
             let buffer_infos = [vk::DescriptorBufferInfo {
                 buffer: uniform_buffer.buffer,
                 offset: 0,
-                range: 64,
+                range: 128,
             }];
             let desc_sets_write = [vk::WriteDescriptorSet::builder()
                 .dst_set(*descset)
