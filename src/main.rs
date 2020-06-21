@@ -93,27 +93,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 match keycode {
                     winit::event::VirtualKeyCode::Right => {
-                        dbg!("turn right");
                         camera.turn_right(0.1);
                     }
                     winit::event::VirtualKeyCode::Left => {
-                        dbg!("turn left");
                         camera.turn_left(0.1);
                     }
-                    winit::event::VirtualKeyCode::Down => {
-                        dbg!("move backward");
+                    winit::event::VirtualKeyCode::S => {
                         camera.move_backward(0.05);
                     }
-                    winit::event::VirtualKeyCode::Up => {
-                        dbg!("move forward");
+                    winit::event::VirtualKeyCode::W => {
                         camera.move_forward(0.05);
                     }
-                    winit::event::VirtualKeyCode::PageUp => {
-                        dbg!("look up");
+                    winit::event::VirtualKeyCode::A => {
+                        camera.move_left(0.05);
+                    }
+                    winit::event::VirtualKeyCode::D => {
+                        camera.move_right(0.05);
+                    }
+                    winit::event::VirtualKeyCode::Up => {
                         camera.turn_up(0.02);
                     }
-                    winit::event::VirtualKeyCode::PageDown => {
-                        dbg!("look down");
+                    winit::event::VirtualKeyCode::Down => {
                         camera.turn_down(0.02);
                     }
                     _ => {}
@@ -1488,6 +1488,14 @@ impl Camera {
     }
     fn move_backward(&mut self, distance: f32) {
         self.move_forward(-distance);
+    }
+    fn move_right(&mut self, distance: f32) {
+        let right = nalgebra::Unit::new_normalize(self.down_direction.cross(&self.view_direction));
+        self.position += distance * right.as_ref();
+        self.update_view_matrix();
+    }
+    fn move_left(&mut self, distance: f32) {
+        self.move_right(-distance)
     }
     fn turn_right(&mut self, angle: f32) {
         let rotation = nalgebra::Rotation3::from_axis_angle(&self.down_direction, angle);
