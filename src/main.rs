@@ -8,21 +8,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::Window::new(&event_loop)?;
     let mut fae = Fae::init(window)?;
+    let mut camera = Camera::default();
     let mut cube = Model::cube();
-    let mut angle = 0.2;
-    let my_special_cube = cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle))
+    cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.1))
+            * nalgebra::Matrix4::new_scaling(0.1))
+        .into(),
+        color: [0.2, 0.4, 1.0],
+    });
+    cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
+            0.05, 0.05, 0.0,
+        )) * nalgebra::Matrix4::new_scaling(0.1))
+        .into(),
+        color: [1.0, 1.0, 0.2],
+    });
+    for i in 0..10 {
+        for j in 0..10 {
+            cube.insert_visibly(InstanceData {
+                model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
+                    i as f32 * 0.2 - 1.0,
+                    j as f32 * 0.2 - 1.0,
+                    0.5,
+                )) * nalgebra::Matrix4::new_scaling(0.03))
+                .into(),
+                color: [1.0, i as f32 * 0.07, j as f32 * 0.07],
+            });
+            cube.insert_visibly(InstanceData {
+                model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
+                    i as f32 * 0.2 - 1.0,
+                    0.0,
+                    j as f32 * 0.2 - 1.0,
+                )) * nalgebra::Matrix4::new_scaling(0.02))
+                .into(),
+                color: [i as f32 * 0.07, j as f32 * 0.07, 1.0],
+            });
+        }
+    }
+    cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, 1.4))
             * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
             * nalgebra::Matrix4::new_scaling(0.1))
         .into(),
         color: [0.0, 0.5, 0.0],
     });
-    let my_special_cube_too = cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle))
-            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
-            * nalgebra::Matrix4::new_scaling(0.1))
+    cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0.0, 0.0))
+            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(0.5, 0.01, 0.01)))
         .into(),
-        color: [1.0, 0.0, 0.5],
+        color: [1.0, 0.5, 0.5],
+    });
+    cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
+            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(0.01, 0.5, 0.01)))
+        .into(),
+        color: [0.5, 1.0, 0.5],
+    });
+    cube.insert_visibly(InstanceData {
+        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.0))
+            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(0.01, 0.01, 0.5)))
+        .into(),
+        color: [0.5, 0.5, 1.0],
     });
     cube.update_vertex_buffer(&fae.allocator)?;
     cube.update_instance_buffer(&fae.allocator)?;
@@ -35,23 +81,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             *controlflow = winit::event_loop::ControlFlow::Exit;
         }
+        Event::WindowEvent {
+            event: WindowEvent::KeyboardInput { input, .. },
+            ..
+        } => {
+            if let winit::event::KeyboardInput {
+                state: winit::event::ElementState::Pressed,
+                virtual_keycode: Some(keycode),
+                ..
+            } = input
+            {
+                match keycode {
+                    winit::event::VirtualKeyCode::Right => {
+                        dbg!("turn right");
+                        camera.turn_right(0.1);
+                    }
+                    winit::event::VirtualKeyCode::Left => {
+                        dbg!("turn left");
+                        camera.turn_left(0.1);
+                    }
+                    winit::event::VirtualKeyCode::Down => {
+                        dbg!("move backward");
+                        camera.move_backward(0.05);
+                    }
+                    winit::event::VirtualKeyCode::Up => {
+                        dbg!("move forward");
+                        camera.move_forward(0.05);
+                    }
+                    winit::event::VirtualKeyCode::PageUp => {
+                        dbg!("look up");
+                        camera.turn_up(0.02);
+                    }
+                    winit::event::VirtualKeyCode::PageDown => {
+                        dbg!("look down");
+                        camera.turn_down(0.02);
+                    }
+                    _ => {}
+                }
+            }
+        }
         Event::MainEventsCleared => {
-            // do some rotation
-            angle += 0.01;
-            fae.models[0]
-                .get_mut(my_special_cube)
-                .unwrap()
-                .model_matrix = (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle))
-                * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
-                * nalgebra::Matrix4::new_scaling(0.1))
-            .into();
-            fae.models[0]
-                .get_mut(my_special_cube_too)
-                .unwrap()
-                .model_matrix = (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, angle * 2.0))
-                * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.1))
-                * nalgebra::Matrix4::new_scaling(0.1))
-            .into();
             fae.window.request_redraw();
         }
         Event::RedrawRequested(_) => {
@@ -82,12 +151,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .expect("resetting fences");
             };
             for m in &mut fae.models {
-                m.update_instance_buffer(&fae.allocator);
+                camera.update_buffer(&fae.allocator, &mut fae.uniform_buffer);
+                m.update_instance_buffer(&fae.allocator).unwrap();
             }
             //update command buffer
-            fae
-            .update_command_buffer(image_index as usize)
-            .expect("updateing the command buffer");
+            fae.update_command_buffer(image_index as usize)
+                .expect("updateing the command buffer");
             // command buffer setup info
             let semaphores_available = [fae.swapchain.image_available[fae.swapchain.current_image]];
             let waiting_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -616,7 +685,9 @@ impl FaeSwapchain {
 
     unsafe fn cleanup(&mut self, logical_device: &ash::Device, allocator: &vk_mem::Allocator) {
         logical_device.destroy_image_view(self.depth_image_view, None);
-        allocator.destroy_image(self.depth_image, &self.depth_image_allocation).unwrap();
+        allocator
+            .destroy_image(self.depth_image, &self.depth_image_allocation)
+            .unwrap();
         for fence in &self.may_begin_drawing {
             logical_device.destroy_fence(*fence, None);
         }
@@ -706,6 +777,7 @@ fn init_render_pass(
 struct Pipeline {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
+    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
 }
 
 impl Pipeline {
@@ -849,15 +921,29 @@ impl Pipeline {
         let color_blend_create_info =
             vk::PipelineColorBlendStateCreateInfo::builder().attachments(&color_blend_attachments);
 
+        let descriptor_set_layout_binding_descs = [vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .build()];
+        let descriptor_set_layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .bindings(&descriptor_set_layout_binding_descs);
+        let descriptor_set_layout = unsafe {
+            logical_device.create_descriptor_set_layout(&descriptor_set_layout_info, None)
+        }?;
+        let desc_layouts = vec![descriptor_set_layout];
+
         // data to pass to pipeline not attached to verticies
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder();
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&desc_layouts);
         let pipeline_layout =
             unsafe { logical_device.create_pipeline_layout(&pipeline_layout_info, None) }?;
-        
+
         let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+
         // pipeline creation info
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(&shader_stages)
@@ -890,11 +976,15 @@ impl Pipeline {
         Ok(Pipeline {
             pipeline: graphics_pipeline,
             layout: pipeline_layout,
+            descriptor_set_layouts: desc_layouts,
         })
     }
 
     fn cleanup(&self, logical_device: &ash::Device) {
         unsafe {
+            for dsl in &self.descriptor_set_layouts {
+                logical_device.destroy_descriptor_set_layout(*dsl, None);
+            }
             logical_device.destroy_pipeline(self.pipeline, None);
             logical_device.destroy_pipeline_layout(self.layout, None);
         }
@@ -1246,6 +1336,76 @@ struct InstanceData {
     color: [f32; 3],
 }
 
+struct Camera {
+    view_matrix: nalgebra::Matrix4<f32>,
+    position: nalgebra::Vector3<f32>,
+    view_direction: nalgebra::Unit<nalgebra::Vector3<f32>>,
+    down_direction: nalgebra::Unit<nalgebra::Vector3<f32>>,
+}
+impl Default for Camera {
+    fn default() -> Self {
+        Camera {
+            view_matrix: nalgebra::Matrix4::identity(),
+            position: nalgebra::Vector3::new(0.0, 0.0, 0.0),
+            view_direction: nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.0, 0.0, 1.0)),
+            down_direction: nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.0, 1.0, 0.0)),
+        }
+    }
+}
+impl Camera {
+    fn update_buffer(&self, allocator: &vk_mem::Allocator, buffer: &mut Buffer) {
+        let data: [[f32; 4]; 4] = self.view_matrix.into();
+        buffer.fill(allocator, &data);
+    }
+    fn update_view_matrix(&mut self) {
+        let right = nalgebra::Unit::new_normalize(self.down_direction.cross(&self.view_direction));
+        let m = nalgebra::Matrix4::new(
+            right.x,
+            right.y,
+            right.z,
+            -right.dot(&self.position), //
+            self.down_direction.x,
+            self.down_direction.y,
+            self.down_direction.z,
+            -self.down_direction.dot(&self.position), //
+            self.view_direction.x,
+            self.view_direction.y,
+            self.view_direction.z,
+            self.view_direction.dot(&self.position), //
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        self.view_matrix = m;
+    }
+    fn move_forward(&mut self, distance: f32) {
+        self.position += distance * self.view_direction.as_ref();
+        self.update_view_matrix();
+    }
+    fn move_backward(&mut self, distance: f32) {
+        self.move_forward(-distance);
+    }
+    fn turn_right(&mut self, angle: f32) {
+        let rotation = nalgebra::Rotation3::from_axis_angle(&self.down_direction, angle);
+        self.view_direction = rotation * self.view_direction;
+        self.update_view_matrix();
+    }
+    fn turn_left(&mut self, angle: f32) {
+        self.turn_right(-angle);
+    }
+    fn turn_up(&mut self, angle: f32) {
+        let right = nalgebra::Unit::new_normalize(self.down_direction.cross(&self.view_direction));
+        let rotation = nalgebra::Rotation3::from_axis_angle(&right, angle);
+        self.view_direction = rotation * self.view_direction;
+        self.down_direction = rotation * self.down_direction;
+        self.update_view_matrix();
+    }
+    fn turn_down(&mut self, angle: f32) {
+        self.turn_up(-angle);
+    }
+}
+
 struct Fae {
     window: winit::window::Window,
     entry: ash::Entry,
@@ -1264,6 +1424,9 @@ struct Fae {
     command_buffers: Vec<vk::CommandBuffer>,
     allocator: vk_mem::Allocator,
     models: Vec<Model<[f32; 3], InstanceData>>,
+    uniform_buffer: Buffer,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 impl Fae {
@@ -1310,10 +1473,7 @@ impl Fae {
             &allocator,
         )?;
         // create render pass
-        let render_pass = init_render_pass(
-            &logical_device,
-            swapchain.surface_format.format,
-        )?;
+        let render_pass = init_render_pass(&logical_device, swapchain.surface_format.format)?;
         // create framebuffers
         swapchain.create_framebuffers(&logical_device, render_pass)?;
         // create pipeline
@@ -1323,6 +1483,49 @@ impl Fae {
         // create command buffers
         let command_buffers =
             create_command_buffers(&logical_device, &pools, swapchain.amount_of_images)?;
+        
+            // create uniform buffer
+        let mut uniform_buffer = Buffer::new(
+            &allocator,
+            64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk_mem::MemoryUsage::CpuToGpu,
+        )?;
+        let camera_transform: [[f32; 4]; 4] = nalgebra::Matrix4::identity().into();
+        uniform_buffer.fill(&allocator, &camera_transform)?;
+
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: swapchain.amount_of_images,
+        }];
+        let descriptor_pool_info = vk::DescriptorPoolCreateInfo::builder()
+            .max_sets(swapchain.amount_of_images)
+            .pool_sizes(&pool_sizes);
+        let descriptor_pool =
+            unsafe { logical_device.create_descriptor_pool(&descriptor_pool_info, None) }?;
+
+        let desc_layouts =
+            vec![pipeline.descriptor_set_layouts[0]; swapchain.amount_of_images as usize];
+        let descriptor_set_allocate_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&desc_layouts);
+        let descriptor_sets =
+            unsafe { logical_device.allocate_descriptor_sets(&descriptor_set_allocate_info) }?;
+
+        for (i, descset) in descriptor_sets.iter().enumerate() {
+            let buffer_infos = [vk::DescriptorBufferInfo {
+                buffer: uniform_buffer.buffer,
+                offset: 0,
+                range: 64,
+            }];
+            let desc_sets_write = [vk::WriteDescriptorSet::builder()
+                .dst_set(*descset)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&buffer_infos)
+                .build()];
+            unsafe { logical_device.update_descriptor_sets(&desc_sets_write, &[]) };
+        }
 
         Ok(Fae {
             window,
@@ -1342,6 +1545,9 @@ impl Fae {
             command_buffers,
             allocator,
             models: vec![],
+            uniform_buffer,
+            descriptor_pool,
+            descriptor_sets,
         })
     }
 
@@ -1374,8 +1580,24 @@ impl Fae {
             })
             .clear_values(&clear_values);
         unsafe {
-            self.device.cmd_begin_render_pass(command_buffer, &render_pass_begin_info, vk::SubpassContents::INLINE);
-            self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
+            self.device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_begin_info,
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline.pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline.layout,
+                0,
+                &[self.descriptor_sets[index]],
+                &[],
+            );
             for m in &self.models {
                 m.draw(&self.device, command_buffer);
             }
@@ -1392,6 +1614,9 @@ impl Drop for Fae {
             self.device
                 .device_wait_idle()
                 .expect("something wrong while waiting");
+            self.allocator
+                .destroy_buffer(self.uniform_buffer.buffer, &self.uniform_buffer.allocation)
+                .unwrap();
             for m in &self.models {
                 if let Some(vb) = &m.vertex_buffer {
                     self.allocator
@@ -1407,6 +1632,8 @@ impl Drop for Fae {
             self.pools.cleanup(&self.device);
             self.pipeline.cleanup(&self.device);
             self.device.destroy_render_pass(self.render_pass, None);
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
             self.swapchain.cleanup(&self.device, &self.allocator);
             self.allocator.destroy();
             self.device.destroy_device(None);
