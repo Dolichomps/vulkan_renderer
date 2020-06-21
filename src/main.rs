@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         color: [0.5, 0.5, 1.0],
     });
     cube.update_vertex_buffer(&fae.allocator)?;
+    cube.update_index_buffer(&fae.allocator)?;
     cube.update_instance_buffer(&fae.allocator)?;
     fae.models = vec![cube];
     use winit::event::{Event, WindowEvent};
@@ -1114,12 +1115,14 @@ impl std::error::Error for InvalidHandle {
 
 struct Model<V, I> {
     vertex_data: Vec<V>,
+    index_data: Vec<u32>,
     handle_to_index: std::collections::HashMap<usize, usize>,
     handles: Vec<usize>,
     instances: Vec<I>,
     first_invisible: usize,
     next_handle: usize,
     vertex_buffer: Option<Buffer>,
+    index_buffer: Option<Buffer>,
     instance_buffer: Option<Buffer>,
 }
 
@@ -1250,6 +1253,26 @@ impl<V, I> Model<V, I> {
             Ok(())
         }
     }
+    fn update_index_buffer(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+    ) -> Result<(), vk_mem::error::Error> {
+        if let Some(buffer) = &mut self.index_buffer {
+            buffer.fill(allocator, &self.index_data)?;
+            Ok(())
+        } else {
+            let bytes = (self.index_data.len() * std::mem::size_of::<u32>()) as u64;
+            let mut buffer = Buffer::new(
+                &allocator,
+                bytes,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                vk_mem::MemoryUsage::CpuToGpu,
+            )?;
+            buffer.fill(allocator, &self.index_data)?;
+            self.index_buffer = Some(buffer);
+            Ok(())
+        }
+    }
     fn update_instance_buffer(
         &mut self,
         allocator: &vk_mem::Allocator,
@@ -1272,28 +1295,37 @@ impl<V, I> Model<V, I> {
     }
     fn draw(&self, logical_device: &ash::Device, command_buffer: vk::CommandBuffer) {
         if let Some(vertex_buffer) = &self.vertex_buffer {
-            if let Some(instance_buffer) = &self.instance_buffer {
-                if self.first_invisible > 0 {
-                    unsafe {
-                        logical_device.cmd_bind_vertex_buffers(
-                            command_buffer,
-                            0,
-                            &[vertex_buffer.buffer],
-                            &[0],
-                        );
-                        logical_device.cmd_bind_vertex_buffers(
-                            command_buffer,
-                            1,
-                            &[instance_buffer.buffer],
-                            &[0],
-                        );
-                        logical_device.cmd_draw(
-                            command_buffer,
-                            self.vertex_data.len() as u32,
-                            self.first_invisible as u32,
-                            0,
-                            0,
-                        );
+            if let Some(index_buffer) = &self.index_buffer {
+                if let Some(instance_buffer) = &self.instance_buffer {
+                    if self.first_invisible > 0 {
+                        unsafe {
+                            logical_device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                0,
+                                &[vertex_buffer.buffer],
+                                &[0],
+                            );
+                            logical_device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                1,
+                                &[instance_buffer.buffer],
+                                &[0],
+                            );
+                            logical_device.cmd_bind_index_buffer(
+                                command_buffer,
+                                index_buffer.buffer,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                            logical_device.cmd_draw_indexed(
+                                command_buffer,
+                                self.index_data.len() as u32,
+                                self.first_invisible as u32,
+                                0,
+                                0,
+                                0,
+                            );
+                        }
                     }
                 }
             }
@@ -1303,22 +1335,23 @@ impl<V, I> Model<V, I> {
 
 impl Model<[f32; 3], InstanceData> {
     fn cube() -> Model<[f32; 3], InstanceData> {
-        let lbf = [-1.0, 1.0, 0.0]; //lbf: left-bottom-front
+        let lbf = [-1.0, 1.0, -1.0]; //lbf: left-bottom-front
         let lbb = [-1.0, 1.0, 1.0];
-        let ltf = [-1.0, -1.0, 0.0];
+        let ltf = [-1.0, -1.0, -1.0];
         let ltb = [-1.0, -1.0, 1.0];
-        let rbf = [1.0, 1.0, 0.0];
+        let rbf = [1.0, 1.0, -1.0];
         let rbb = [1.0, 1.0, 1.0];
-        let rtf = [1.0, -1.0, 0.0];
+        let rtf = [1.0, -1.0, -1.0];
         let rtb = [1.0, -1.0, 1.0];
         Model {
-            vertex_data: vec![
-                lbf, lbb, rbb, lbf, rbb, rbf, //bottom
-                ltf, rtb, ltb, ltf, rtf, rtb, //top
-                lbf, rtf, ltf, lbf, rbf, rtf, //front
-                lbb, ltb, rtb, lbb, rtb, rbb, //back
-                lbf, ltf, lbb, lbb, ltf, ltb, //left
-                rbf, rbb, rtf, rbb, rtb, rtf, //right
+            vertex_data: vec![lbf, lbb, ltf, ltb, rbf, rbb, rtf, rtb],
+            index_data: vec![
+                0, 1, 5, 0, 5, 4, //bottom
+                2, 7, 3, 2, 6, 7, //top
+                0, 6, 2, 0, 4, 6, //front
+                1, 3, 7, 1, 7, 5, //back
+                0, 2, 1, 1, 2, 3, //left
+                4, 5, 6, 5, 7, 6, //right
             ],
             handle_to_index: std::collections::HashMap::new(),
             handles: Vec::new(),
@@ -1326,6 +1359,7 @@ impl Model<[f32; 3], InstanceData> {
             first_invisible: 0,
             next_handle: 0,
             vertex_buffer: None,
+            index_buffer: None,
             instance_buffer: None,
         }
     }
@@ -1738,6 +1772,11 @@ impl Drop for Fae {
                         .expect("problem with buffer destruction")
                 }
                 if let Some(ib) = &m.instance_buffer {
+                    self.allocator
+                        .destroy_buffer(ib.buffer, &ib.allocation)
+                        .expect("problem with buffer destruction");
+                }
+                if let Some(ib) = &m.index_buffer {
                     self.allocator
                         .destroy_buffer(ib.buffer, &ib.allocation)
                         .expect("problem with buffer destruction");
