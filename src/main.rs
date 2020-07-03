@@ -31,71 +31,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = winit::window::Window::new(&event_loop)?;
     let mut fae = Fae::init(window)?;
     let mut camera = Camera::builder().build();
-    let mut cube = Model::cube();
-    cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.1))
-            * nalgebra::Matrix4::new_scaling(0.1))
-        .into(),
-        color: [0.2, 0.4, 1.0],
+    let mut sphere = Model::sphere(3);
+    sphere.insert_visibly(InstanceData {
+        model_matrix: nalgebra::Matrix4::new_scaling(0.5).into(),
+        color: [0.5, 0.0, 0.0],
     });
-    cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
-            0.05, 0.05, 0.0,
-        )) * nalgebra::Matrix4::new_scaling(0.1))
-        .into(),
-        color: [1.0, 1.0, 0.2],
-    });
-    for i in 0..10 {
-        for j in 0..10 {
-            cube.insert_visibly(InstanceData {
-                model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
-                    i as f32 * 0.2 - 1.0,
-                    j as f32 * 0.2 - 1.0,
-                    0.5,
-                )) * nalgebra::Matrix4::new_scaling(0.03))
-                .into(),
-                color: [1.0, i as f32 * 0.07, j as f32 * 0.07],
-            });
-            cube.insert_visibly(InstanceData {
-                model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
-                    i as f32 * 0.2 - 1.0,
-                    0.0,
-                    j as f32 * 0.2 - 1.0,
-                )) * nalgebra::Matrix4::new_scaling(0.02))
-                .into(),
-                color: [i as f32 * 0.07, j as f32 * 0.07, 1.0],
-            });
-        }
-    }
-    cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::from_scaled_axis(nalgebra::Vector3::new(0.0, 0.0, 1.4))
-            * nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
-            * nalgebra::Matrix4::new_scaling(0.1))
-        .into(),
-        color: [0.0, 0.5, 0.0],
-    });
-    cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.5, 0.0, 0.0))
-            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(0.5, 0.01, 0.01)))
-        .into(),
-        color: [1.0, 0.5, 0.5],
-    });
-    cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.5, 0.0))
-            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(0.01, 0.5, 0.01)))
-        .into(),
-        color: [0.5, 1.0, 0.5],
-    });
-    cube.insert_visibly(InstanceData {
-        model_matrix: (nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, 0.0))
-            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(0.01, 0.01, 0.5)))
-        .into(),
-        color: [0.5, 0.5, 1.0],
-    });
-    cube.update_vertex_buffer(&fae.allocator)?;
-    cube.update_index_buffer(&fae.allocator)?;
-    cube.update_instance_buffer(&fae.allocator)?;
-    fae.models = vec![cube];
+    sphere.update_vertex_buffer(&fae.allocator)?;
+    sphere.update_index_buffer(&fae.allocator)?;
+    sphere.update_instance_buffer(&fae.allocator)?;
+    fae.models = vec![sphere];
     use winit::event::{Event, WindowEvent};
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent {

@@ -10,8 +10,10 @@ layout (set = 0, binding = 0) uniform UniformBufferObject {
 } ubo;
 
 layout (location = 0) out vec4 color_data_for_frag;
+layout (location = 1) out vec3 normal;
 
 void main() {
     gl_Position = ubo.projection_matrix * ubo.view_matrix * model_matrix * vec4(position, 1.0);
     color_data_for_frag = vec4(color, 1.0);
+    normal = normalize(position);
 }
