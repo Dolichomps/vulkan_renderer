@@ -17,7 +17,7 @@ pub struct Fae {
     pools: Pools,
     pub command_buffers: Vec<vk::CommandBuffer>,
     pub allocator: vk_mem::Allocator,
-    pub models: Vec<Model<[f32; 3], InstanceData>>,
+    pub models: Vec<Model<model::VertexData, InstanceData>>,
     pub uniform_buffer: Buffer,
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,

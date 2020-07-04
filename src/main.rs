@@ -32,10 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fae = Fae::init(window)?;
     let mut camera = Camera::builder().build();
     let mut sphere = Model::sphere(3);
-    sphere.insert_visibly(InstanceData {
-        model_matrix: nalgebra::Matrix4::new_scaling(0.5).into(),
-        color: [0.5, 0.0, 0.0],
-    });
+    sphere.insert_visibly(InstanceData::from_matrix_and_color(
+        nalgebra::Matrix4::new_scaling(0.5),
+        [0.5, 0.0, 0.0],
+    ));
     sphere.update_vertex_buffer(&fae.allocator)?;
     sphere.update_index_buffer(&fae.allocator)?;
     sphere.update_instance_buffer(&fae.allocator)?;
